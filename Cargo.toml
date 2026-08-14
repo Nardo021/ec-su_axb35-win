@@ -1,5 +1,5 @@
 [workspace]
-members = ["server", "client", "cli"]
+members = ["server"]
 resolver = "2"
 
 [profile.release]

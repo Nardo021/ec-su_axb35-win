@@ -1,18 +1,25 @@
 [package]
-name = "ec-su_axb35-server"
+name = "evox2-control"
 version = "2.0.0"
 edition = "2021"
 build = "build.rs"
 
+[[bin]]
+name = "evox2-control"
+path = "src/main.rs"
+
 [dependencies]
-winapi = { version = "0.3", features = ["winnt", "winerror", "handleapi", "fileapi", "ioapiset", "minwinbase", "errhandlingapi", "winbase", "processthreadsapi", "securitybaseapi", "winuser", "consoleapi", "processenv", "synchapi", "winreg"] }
-windows-service = "0.6"
-tokio = { version = "1.0", features = ["full"] }
-warp = "0.3"
+winapi = { version = "0.3", features = ["winnt", "winerror", "handleapi", "fileapi", "ioapiset", "minwinbase", "errhandlingapi", "winbase", "processthreadsapi", "securitybaseapi", "winuser", "consoleapi", "processenv", "synchapi", "winreg", "wincon", "shellapi", "libloaderapi"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.0", features = ["derive"] }
+egui = "0.33"
+eframe = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "glow",
+] }
+image = "0.25"
 
-[dev-dependencies]
-tokio = { version = "1.0", features = ["full", "macros", "rt"] }
+[build-dependencies]
+winres = "0.1"

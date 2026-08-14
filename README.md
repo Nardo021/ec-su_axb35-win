@@ -7,8 +7,8 @@ Secure Boot can remain enabled.
 A Windows control and monitoring solution for the onboard Embedded Controller
 (ITE IT5570E) on [Sixunited SU_AXB35](https://strixhalo-homelab.d7.wtf/Hardware/Boards/Sixunited-AXB35)
 boards used by the GMKtec EVO-X2. It is a distant relative of
-[ec-su_axb35-linux](https://github.com/cmetz/ec-su_axb35-linux) and consists of
-a privileged Windows service, an optional GUI client, and `evox2ctl`.
+[ec-su_axb35-linux](https://github.com/cmetz/ec-su_axb35-linux). One program,
+`evox2-control.exe`, is the window, the tray icon, and the CLI (`evox2ctl`).
 
 This application does not require Secure Boot to be disabled.
 
@@ -20,7 +20,7 @@ See [docs/PAWNIO_MIGRATION.md](docs/PAWNIO_MIGRATION.md) for the driver change.
 - EC firmware 1.04 or higher
 - Windows 11 (Windows 10 is untested)
 - Official [PawnIO](https://pawnio.eu/) (signed release)
-- Administrator privileges to install the service
+- Administrator privileges to run the program
 
 Secure Boot, Test Signing, and Memory Integrity/HVCI can stay in their default
 secure configuration.
@@ -30,9 +30,18 @@ secure configuration.
 1. Install the official PawnIO release from https://pawnio.eu/.
 2. Run `ec-su_axb35-win-installer-2.0.0.exe` as Administrator, or copy the
    release binaries from `dist/`.
-3. The installer registers the `ec-su_axb35-win` service
-   (`ec-su_axb35-server.exe --service`).
-4. Start the optional GUI client, or use `evox2ctl`.
+3. Double-click `evox2-control.exe`. That is the only program you need.
+4. Closing the window hides it to the tray by default. Curve monitoring keeps
+   running. Use the tray menu or Settings to quit. Power mode and fan settings
+   are written immediately and restored the next time the app starts.
+
+If an older build left the `ec-su_axb35-win` Windows service running, stop and
+remove it so it does not keep a second copy in the background:
+
+```powershell
+sc.exe stop ec-su_axb35-win
+sc.exe delete ec-su_axb35-win
+```
 
 Do not install WinRing0, inpoutx64, or any unsigned kernel driver.
 
@@ -47,8 +56,8 @@ PawnIO is an external official dependency. This project:
 It does not bundle `PawnIO.sys`, does not download kernel binaries at runtime,
 and does not use the unrestricted/test-signed PawnIO edition.
 
-If PawnIO is missing, the service exits with a readable error and does not
-crash the machine.
+If PawnIO is missing, the window shows a message in the current language and
+opens https://pawnio.eu/. It does not download a driver.
 
 ## Secure Boot
 
@@ -57,8 +66,11 @@ state (`Secure Boot: Enabled`) and never attempts to change it.
 
 ## GUI usage
 
-The GUI client talks to `http://127.0.0.1:8395` and does not need direct EC
-privileges once the service is running.
+Double-click `evox2-control.exe` (Administrator). The GUI talks to the EC
+in-process. It does not need a separate server process.
+
+A second double-click focuses the existing window instead of opening another
+EC session.
 
 The APU block shows the current power mode and a selector:
 
@@ -70,6 +82,22 @@ Power Mode
 ```
 
 Fan blocks still support auto / fixed / curve, RPM, and temperature charts.
+
+### Tray
+
+Left-click the tray icon to show the window.
+
+Right-click for Quiet / Balanced / Performance, Show window, and Exit.
+
+### Settings
+
+On the same window:
+
+- Close window: minimize to tray (default) or quit the program
+- Start with Windows: off by default; writes `HKCU\...\Run` as `EVO-X2 Control`
+- Language: 中文 (default) or English
+
+There is no Windows service and no REST API.
 
 ## CLI usage
 
@@ -91,29 +119,8 @@ evox2ctl.exe mode balanced
 evox2ctl.exe mode performance
 ```
 
-`diagnose` does not change hardware state.
-
-## REST API
-
-Default bind: `http://127.0.0.1:8395`
-
-Do not expose the unauthenticated REST API directly to the Internet.
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/status` | EC firmware and runtime status |
-| GET | `/metrics` | Power mode, temperature, fans |
-| GET/POST | `/apu/power_mode` | `quiet` / `balanced` / `performance` |
-| GET | `/apu/temp` | APU temperature |
-| GET | `/fanX/rpm` | Fan RPM |
-| GET/POST | `/fanX/mode` | `auto` / `fixed` / `curve` |
-| GET/POST | `/fanX/level` | Fixed level 0-5 |
-| GET/POST | `/fanX/rampup_curve` | Curve thresholds |
-| GET/POST | `/fanX/rampdown_curve` | Curve thresholds |
-
-There is no arbitrary `/ec/write` endpoint.
-
-OpenAPI: [server/openapi.yaml](server/openapi.yaml).
+`diagnose` does not change hardware state. CLI text follows the `language`
+value in `config.json`.
 
 ## Troubleshooting
 
@@ -123,21 +130,18 @@ OpenAPI: [server/openapi.yaml](server/openapi.yaml).
 | `Unsupported EC firmware` | Update EC firmware to 1.04+ |
 | `Unsupported hardware` | Confirm the machine is AXB35 / EVO-X2 |
 | `EC timeout waiting for input buffer to clear` | Another EC client may be holding the ports |
-| GUI cannot connect | Confirm the service is running on `127.0.0.1:8395` |
-| Service will not start | `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\server.log` |
+| GUI cannot start | Confirm PawnIO is installed, the app is elevated, and no leftover service is running |
+| Settings did not come back | `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json` |
 
 ## Architecture
 
 ```text
-Windows
-   │
-   ├── EVO-X2 Control Service  (Administrator / LocalSystem)
-   │      ├── PawnIO + LpcACPIEC
-   │      ├── EC controller
-   │      └── localhost REST API
-   │
-   ├── GUI client              (no direct EC access)
-   └── evox2ctl                (localhost API + diagnostics)
+evox2-control.exe     one window + tray, in-process EC
+   close window    → hide to tray (default) or exit
+   next launch     → restore config.json onto the EC
+   second launch   → show the existing window
+
+evox2ctl.exe          same binary, one-shot CLI
 ```
 
 Configuration: `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`
@@ -146,18 +150,21 @@ Configuration: `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`
 {
   "host": "127.0.0.1",
   "port": 8395,
-  "log_path": "C:\\ProgramData\\ec-su_axb35-win\\server.log"
+  "log_path": "C:\\ProgramData\\ec-su_axb35-win\\server.log",
+  "close_to_tray": true,
+  "start_with_windows": false,
+  "language": "zh"
 }
 ```
+
+`host` and `port` may remain in the file from older builds. They are not used.
 
 ## Security
 
 - Treat EC control as privileged hardware access.
-- The API has no authentication.
-- Default bind is loopback only.
+- There is no network API.
 - The installer does not open Windows Firewall ports.
 - Unknown machines do not receive speculative EC writes.
-- Do not expose the unauthenticated REST API directly to the Internet.
 
 ## Building from source
 

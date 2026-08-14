@@ -26,7 +26,7 @@ intentionally out of scope for this fork.
 ## New architecture
 
 ```text
-Application / Windows service
+evox2-control.exe  (window + tray, or evox2ctl)
     ↓
 PawnIO userspace API (CreateFile + DeviceIoControl)
     ↓
@@ -78,9 +78,10 @@ from `PawnIO/include/pawnio_um.h` and `PawnIOLib`:
 The official signed `LpcACPIEC.bin` from PawnIO.Modules 0.2.10 is embedded at
 build time. See `server/vendor/pawnio/README.md`.
 
-The service does **not** install PawnIO itself and never downloads a kernel
+The application does **not** install PawnIO itself and never downloads a kernel
 binary at runtime. Install the official signed PawnIO release from
-https://pawnio.eu/.
+https://pawnio.eu/. If PawnIO is missing, the current-language message box
+offers to open that page.
 
 ## EC port restrictions
 
@@ -96,14 +97,13 @@ Complete EC transactions (command + address + data) are serialized with:
 
 - Secure Boot, Test Signing, and Memory Integrity can remain in their secure
   defaults.
-- The REST API still defaults to `127.0.0.1:8395` and has no authentication.
-- Binding to a non-loopback address logs a strong warning.
+- There is no REST API and no Windows service.
 - There is no arbitrary EC write endpoint.
 - Unknown machines can be observed but will not receive speculative EC writes.
 
 ## Remaining limitations
 
-- Physical GMKtec EVO-X2 validation is still required.
+- The single-window PawnIO path has been validated on a GMKtec EVO-X2.
 - Official PawnIO must already be installed.
 - The official PawnIO driver will reject unofficial / unsigned modules.
 - Some anti-cheat software may still object to any hardware-access driver,

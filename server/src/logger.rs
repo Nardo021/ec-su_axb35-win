@@ -34,6 +34,13 @@ impl Logger {
         })
     }
 
+    pub fn silent() -> Self {
+        Logger {
+            file_writer: None,
+            service_mode: true,
+        }
+    }
+
     fn log_message(&mut self, level: &str, message: &str) {
         let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
         let log_line = format!("[{}] {}: {}", timestamp, level, message);
@@ -65,6 +72,7 @@ impl Logger {
         self.log_message("ERROR", message);
     }
 
+    #[allow(dead_code)]
     pub fn debug(&mut self, message: &str) {
         self.log_message("DEBUG", message);
     }

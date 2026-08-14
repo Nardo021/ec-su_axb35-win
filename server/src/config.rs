@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+use crate::i18n::Language;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FanConfig {
     pub mode: String,
@@ -21,7 +23,15 @@ impl Default for FanConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+fn default_close_to_tray() -> bool {
+    true
+}
+
+fn default_language() -> String {
+    "zh".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -30,6 +40,12 @@ pub struct ServerConfig {
     pub fan1: Option<FanConfig>,
     pub fan2: Option<FanConfig>,
     pub fan3: Option<FanConfig>,
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
+    #[serde(default)]
+    pub start_with_windows: bool,
+    #[serde(default = "default_language")]
+    pub language: String,
 }
 
 impl Default for ServerConfig {
@@ -50,11 +66,18 @@ impl Default for ServerConfig {
             fan1: Some(FanConfig::default()),
             fan2: Some(FanConfig::default()),
             fan3: Some(fan3_config),
+            close_to_tray: true,
+            start_with_windows: false,
+            language: default_language(),
         }
     }
 }
 
 impl ServerConfig {
+    pub fn language(&self) -> Language {
+        Language::from_code(&self.language)
+    }
+
     pub fn load() -> Result<Self, String> {
         let system_drive = std::env::var("SYSTEMDRIVE").unwrap_or_else(|_| "C:".to_string());
         let config_path = format!(
@@ -63,23 +86,16 @@ impl ServerConfig {
         );
 
         if !Path::new(&config_path).exists() {
-            // Create default config if it doesn't exist
             let default_config = ServerConfig::default();
-
-            // Create directory if it doesn't exist
             let config_dir = Path::new(&config_path).parent().unwrap();
             if !config_dir.exists() {
                 fs::create_dir_all(config_dir)
                     .map_err(|e| format!("Failed to create config directory: {}", e))?;
             }
-
-            // Write default config
             let config_json = serde_json::to_string_pretty(&default_config)
                 .map_err(|e| format!("Failed to serialize default config: {}", e))?;
-
             fs::write(&config_path, config_json)
                 .map_err(|e| format!("Failed to write default config: {}", e))?;
-
             return Ok(default_config);
         }
 
@@ -89,18 +105,10 @@ impl ServerConfig {
         let mut config: ServerConfig = serde_json::from_str(&config_content)
             .map_err(|e| format!("Failed to parse config file: {}", e))?;
 
-        // Ensure paths are absolute
         if !config.log_path.contains(':') {
             config.log_path = format!(
                 "{}\\ProgramData\\ec-su_axb35-win\\{}",
                 system_drive, config.log_path
-            );
-        }
-
-        if !is_loopback_host(&config.host) {
-            eprintln!(
-                "WARNING: The unauthenticated hardware-control API is bound to {}. Do not expose it to the LAN or Internet.",
-                config.host
             );
         }
 
@@ -114,24 +122,55 @@ impl ServerConfig {
             system_drive
         );
 
-        // Create directory if it doesn't exist
         let config_dir = Path::new(&config_path).parent().unwrap();
         if !config_dir.exists() {
             fs::create_dir_all(config_dir)
                 .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
 
-        // Serialize and write config
         let config_json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
-
         fs::write(&config_path, config_json)
             .map_err(|e| format!("Failed to write config file: {}", e))?;
-
         Ok(())
     }
 }
 
-pub fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "::1" | "localhost")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_config_gets_ui_defaults() {
+        let parsed: ServerConfig = serde_json::from_str(
+            r#"{
+                "host": "127.0.0.1",
+                "port": 8395,
+                "log_path": "C:\\ProgramData\\ec-su_axb35-win\\server.log"
+            }"#,
+        )
+        .unwrap();
+        assert!(parsed.close_to_tray);
+        assert!(!parsed.start_with_windows);
+        assert_eq!(parsed.language, "zh");
+        assert_eq!(parsed.language(), Language::Zh);
+    }
+
+    #[test]
+    fn language_en_parses() {
+        let parsed: ServerConfig = serde_json::from_str(
+            r#"{
+                "host": "127.0.0.1",
+                "port": 8395,
+                "log_path": "C:\\temp\\server.log",
+                "close_to_tray": false,
+                "start_with_windows": true,
+                "language": "en"
+            }"#,
+        )
+        .unwrap();
+        assert!(!parsed.close_to_tray);
+        assert!(parsed.start_with_windows);
+        assert_eq!(parsed.language(), Language::En);
+    }
 }

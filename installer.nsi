@@ -4,13 +4,13 @@
 !define PRODUCT_VERSION "2.0.0"
 !define PRODUCT_PUBLISHER "deseven"
 !define PRODUCT_WEB_SITE "https://github.com/deseven/ec-su_axb35-win"
-!define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\ec-su_axb35-server.exe"
+!define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\evox2-control.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
 
 !define SERVICE_NAME "ec-su_axb35-win"
-!define SERVICE_DISPLAY_NAME "EC SU_AXB35 Server"
-!define SERVICE_DESCRIPTION "Control server for SU_AXB35 Embedded Controller"
+!define SERVICE_DISPLAY_NAME "EVO-X2 Control"
+!define SERVICE_DESCRIPTION "Optional background service for EVO-X2 / SU_AXB35 EC control"
 
 ; Installation directories
 !define INSTALL_DIR "$PROGRAMFILES64\ec-su_axb35-win"
@@ -35,8 +35,8 @@
 ; Instfiles page
 !insertmacro MUI_PAGE_INSTFILES
 ; Finish page with option to run client
-!define MUI_FINISHPAGE_RUN "$INSTDIR\ec-su_axb35-win-client.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Run EC SU_AXB35 Client"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\evox2-control.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "Run EVO-X2 Control"
 !insertmacro MUI_PAGE_FINISH
 
 ; Uninstaller pages
@@ -84,7 +84,7 @@ Function .onInit
 
   ReadRegStr $1 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO" "DisplayVersion"
   ${If} $1 == ""
-    MessageBox MB_ICONEXCLAMATION "PawnIO was not detected.$\r$\n$\r$\nInstall the official signed PawnIO release from https://pawnio.eu/ before starting the service.$\r$\n$\r$\nSecure Boot can remain enabled. This installer does not bundle a kernel driver."
+    MessageBox MB_ICONEXCLAMATION "PawnIO was not detected.$\r$\n$\r$\nInstall the official signed PawnIO release from https://pawnio.eu/ before using EVO-X2 Control.$\r$\n$\r$\nSecure Boot can remain enabled. This installer does not bundle a kernel driver."
   ${EndIf}
 FunctionEnd
 
@@ -103,53 +103,19 @@ Function StopExistingService
 FunctionEnd
 
 Function KillExistingClientProcess
-  DetailPrint "Checking for existing client process..."
-  
-  ; Kill any running client processes
+  DetailPrint "Checking for existing app processes..."
+  nsExec::ExecToLog 'taskkill /F /IM evox2-control.exe'
+  nsExec::ExecToLog 'taskkill /F /IM evox2ctl.exe'
   nsExec::ExecToLog 'taskkill /F /IM ec-su_axb35-win-client.exe'
-  Pop $0
-  ${If} $0 == 0
-    DetailPrint "Existing client process terminated"
-    Sleep 1000 ; Wait 1 second
-  ${EndIf}
+  nsExec::ExecToLog 'taskkill /F /IM ec-su_axb35-server.exe'
+  Sleep 1000
 FunctionEnd
 
-Function CreateOrUpdateAndStartService
-  DetailPrint "Creating or updating service..."
-  
-  ; Try to create the service first
-  nsExec::ExecToLog 'sc create "${SERVICE_NAME}" binPath= "$INSTDIR\ec-su_axb35-server.exe --service" DisplayName= "${SERVICE_DISPLAY_NAME}" start= auto'
-  Pop $0
-  ${If} $0 == 1073
-    ; Service already exists, update it instead
-    DetailPrint "Service exists, updating configuration..."
-    nsExec::ExecToLog 'sc config "${SERVICE_NAME}" binPath= "$INSTDIR\ec-su_axb35-server.exe --service" DisplayName= "${SERVICE_DISPLAY_NAME}" start= auto'
-    Pop $0
-    ${If} $0 != 0
-      MessageBox MB_ICONSTOP "Failed to update service configuration. Error code: $0"
-      Abort
-    ${EndIf}
-  ${ElseIf} $0 != 0
-    MessageBox MB_ICONSTOP "Failed to create service. Error code: $0"
-    Abort
-  ${EndIf}
-  
-  ; Set service description
-  nsExec::ExecToLog 'sc description "${SERVICE_NAME}" "${SERVICE_DESCRIPTION}"'
-  
-  DetailPrint "Starting service..."
-  nsExec::ExecToLog 'sc start "${SERVICE_NAME}"'
-  Pop $0
-  ${If} $0 != 0
-    ${If} $0 != 1056
-      ; Error 1056 means service is already running, which is fine
-      MessageBox MB_ICONEXCLAMATION "Service created/updated but failed to start. You can start it manually from Services. Error code: $0"
-    ${Else}
-      DetailPrint "Service is already running!"
-    ${EndIf}
-  ${Else}
-    DetailPrint "Service started successfully!"
-  ${EndIf}
+Function RemoveExistingService
+  DetailPrint "Removing leftover background service if present..."
+  nsExec::ExecToLog 'sc stop "${SERVICE_NAME}"'
+  Sleep 2000
+  nsExec::ExecToLog 'sc delete "${SERVICE_NAME}"'
 FunctionEnd
 
 
@@ -164,15 +130,9 @@ Section "MainSection" SEC01
   SetOutPath "$INSTDIR"
   SetOverwrite ifnewer
   
-  ; Install server binary
-  DetailPrint "Installing server binary..."
-  File "target\release\ec-su_axb35-server.exe"
-  File "/oname=evox2-control.exe" "target\release\ec-su_axb35-server.exe"
-  
-  ; Install client and CLI
-  DetailPrint "Installing client and CLI..."
-  File "target\release\ec-su_axb35-win-client.exe"
-  File "target\release\evox2ctl.exe"
+  DetailPrint "Installing EVO-X2 Control..."
+  File "target\release\evox2-control.exe"
+  File "/oname=evox2ctl.exe" "target\release\evox2-control.exe"
   
   ; Create scripts directory and install scripts
   DetailPrint "Installing scripts..."
@@ -181,18 +141,15 @@ Section "MainSection" SEC01
   File "server\scripts\info.ps1"
   File "server\scripts\test_fan_mode_fixed.ps1"
   
-  ; The service will run as SYSTEM and should have access to PROGRAMDATA
-  DetailPrint "Setting directory permissions..."
-  
-  ; Create/update and start service
-  Call CreateOrUpdateAndStartService
+  DetailPrint "This build is a single GUI app. No background service is installed."
+  Call RemoveExistingService
 SectionEnd
 
 Section -AdditionalIcons
   SetOutPath $INSTDIR
   WriteIniStr "$INSTDIR\${PRODUCT_NAME}.url" "InternetShortcut" "URL" "${PRODUCT_WEB_SITE}"
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\EC SU_AXB35 Client.lnk" "$INSTDIR\ec-su_axb35-win-client.exe"
+  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\EVO-X2 Control.lnk" "$INSTDIR\evox2-control.exe"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Quiet.lnk" "$INSTDIR\evox2ctl.exe" "mode quiet"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Balanced.lnk" "$INSTDIR\evox2ctl.exe" "mode balanced"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Performance.lnk" "$INSTDIR\evox2ctl.exe" "mode performance"
@@ -202,10 +159,10 @@ SectionEnd
 
 Section -Post
   WriteUninstaller "$INSTDIR\uninst.exe"
-  WriteRegStr HKLM "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\ec-su_axb35-server.exe"
+  WriteRegStr HKLM "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\evox2-control.exe"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "$(^Name)"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninst.exe"
-  WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\ec-su_axb35-server.exe"
+  WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\evox2-control.exe"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
@@ -242,7 +199,8 @@ Section Uninstall
   nsExec::ExecToLog 'sc delete "${SERVICE_NAME}"'
   Sleep 1000
   
-  ; Kill client process if running before uninstall
+  nsExec::ExecToLog 'taskkill /F /IM evox2-control.exe'
+  nsExec::ExecToLog 'taskkill /F /IM evox2ctl.exe'
   nsExec::ExecToLog 'taskkill /F /IM ec-su_axb35-win-client.exe'
   Sleep 1000
   
@@ -262,6 +220,7 @@ Section Uninstall
   RMDir "$APPDATA\ec-su_axb35-win"
   
   ; Remove shortcuts
+  Delete "$SMPROGRAMS\${PRODUCT_NAME}\EVO-X2 Control.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\EC SU_AXB35 Client.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\Quiet.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\Balanced.lnk"

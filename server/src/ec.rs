@@ -205,7 +205,7 @@ impl<B: EcIoBackend> EcController<B> {
         )
     }
 
-    pub async fn execute_operation(&self, operation: EcOperation) -> Result<EcResult, String> {
+    pub fn execute_operation(&self, operation: EcOperation) -> Result<EcResult, String> {
         match operation {
             EcOperation::GetFirmwareVersion => {
                 let (major, minor) = self.read_firmware_version()?;
@@ -663,21 +663,19 @@ mod tests {
         assert_eq!(PowerMode::from_name("turbo"), None);
     }
 
-    #[tokio::test]
-    async fn set_power_mode_writes_register_0x31() {
+    #[test]
+    fn set_power_mode_writes_register_0x31() {
         let mock = MockEcIoBackend::with_firmware(1, 4);
         let controller = EcController::new_unchecked(mock.clone());
 
         controller
             .execute_operation(EcOperation::SetApuPowerMode("performance".into()))
-            .await
             .unwrap();
 
         assert_eq!(mock.register(EC_REG_APU_POWER_MODE), 0x01);
 
         let mode = controller
             .execute_operation(EcOperation::GetApuPowerMode)
-            .await
             .unwrap();
         assert!(matches!(mode, EcResult::ApuPowerMode(ref value) if value == "performance"));
 
@@ -694,43 +692,38 @@ mod tests {
         assert!(writes.contains(&(EC_DATA_PORT, 0x01)));
     }
 
-    #[tokio::test]
-    async fn quiet_and_balanced_use_upstream_values() {
+    #[test]
+    fn quiet_and_balanced_use_upstream_values() {
         let mock = MockEcIoBackend::with_firmware(1, 4);
         let controller = EcController::new_unchecked(mock.clone());
 
         controller
             .execute_operation(EcOperation::SetApuPowerMode("quiet".into()))
-            .await
             .unwrap();
         assert_eq!(mock.register(EC_REG_APU_POWER_MODE), 0x02);
 
         controller
             .execute_operation(EcOperation::SetApuPowerMode("balanced".into()))
-            .await
             .unwrap();
         assert_eq!(mock.register(EC_REG_APU_POWER_MODE), 0x00);
     }
 
-    #[tokio::test]
-    async fn invalid_power_mode_never_reaches_hardware() {
+    #[test]
+    fn invalid_power_mode_never_reaches_hardware() {
         let mock = MockEcIoBackend::with_firmware(1, 4);
         let controller = EcController::new_unchecked(mock.clone());
-        let result = controller
-            .execute_operation(EcOperation::SetApuPowerMode("turbo".into()))
-            .await;
+        let result = controller.execute_operation(EcOperation::SetApuPowerMode("turbo".into()));
         assert!(result.unwrap_err().contains("Invalid power mode"));
         assert!(mock.ops().is_empty());
         assert_eq!(mock.register(EC_REG_APU_POWER_MODE), 0);
     }
 
-    #[tokio::test]
-    async fn ibf_stuck_times_out() {
+    #[test]
+    fn ibf_stuck_times_out() {
         let mock = MockEcIoBackend::with_ibf_stuck();
         let controller = EcController::new_unchecked(mock);
         let error = controller
             .execute_operation(EcOperation::GetApuPowerMode)
-            .await
             .unwrap_err();
         assert!(
             error.contains("EC timeout waiting for input buffer to clear"),
@@ -738,13 +731,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn write_transaction_uses_expected_order() {
+    #[test]
+    fn write_transaction_uses_expected_order() {
         let mock = MockEcIoBackend::with_firmware(1, 4);
         let controller = EcController::new_unchecked(mock.clone());
         controller
             .execute_operation(EcOperation::SetApuPowerMode("quiet".into()))
-            .await
             .unwrap();
 
         let writes: Vec<_> = mock
@@ -766,8 +758,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn concurrent_writes_do_not_interleave_transactions() {
+    #[test]
+    fn concurrent_writes_do_not_interleave_transactions() {
         let mock = MockEcIoBackend::with_firmware(1, 4);
         let controller = Arc::new(EcController::new_unchecked(mock.clone()));
         let modes = ["quiet", "balanced", "performance"];
@@ -775,16 +767,9 @@ mod tests {
         for mode in modes {
             let controller = Arc::clone(&controller);
             handles.push(thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
+                controller
+                    .execute_operation(EcOperation::SetApuPowerMode(mode.to_string()))
                     .unwrap();
-                runtime.block_on(async {
-                    controller
-                        .execute_operation(EcOperation::SetApuPowerMode(mode.to_string()))
-                        .await
-                        .unwrap();
-                });
             }));
         }
         for handle in handles {
@@ -816,8 +801,8 @@ mod tests {
         assert_eq!(format_firmware_version(1, 4), "1.04");
     }
 
-    #[tokio::test]
-    async fn unknown_hardware_blocks_writes() {
+    #[test]
+    fn unknown_hardware_blocks_writes() {
         let mock = MockEcIoBackend::with_firmware(1, 4);
         let hardware = HardwareIdentity {
             system_manufacturer: "Dell Inc.".into(),
@@ -828,7 +813,6 @@ mod tests {
         assert!(!controller.writes_allowed());
         let error = controller
             .execute_operation(EcOperation::SetApuPowerMode("quiet".into()))
-            .await
             .unwrap_err();
         assert!(error.contains("Unsupported hardware"));
         assert_eq!(mock.register(EC_REG_APU_POWER_MODE), 0);
