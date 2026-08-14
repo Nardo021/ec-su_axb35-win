@@ -1,14 +1,13 @@
 # Rust build artifacts
+/target/
 client/target/
-client/Cargo.lock
 server/target/
-server/Cargo.lock
-ec-probe-poc/target/
-ec-probe-poc/Cargo.lock
+cli/target/
 
-# Executable files
+# Executable and kernel files
 *.exe
 *.pdb
+*.sys
 
 # IDE files
 .vscode/

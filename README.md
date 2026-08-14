@@ -1,128 +1,187 @@
-# ec-su_axb35-win
+# EVO-X2 Control for Windows
 
-A Windows control & monitoring solution for the onboard Embedded Controller (ITE IT5570E) on [Sixunited's SU_AXB35 boards](https://strixhalo-homelab.d7.wtf/Hardware/Boards/Sixunited-AXB35). A distant relative of [ec-su_axb35-linux](https://github.com/cmetz/ec-su_axb35-linux), consists of a server and a GUI client. The latest stable version is always available in [Releases](https://github.com/deseven/ec-su_axb35-win/releases).
+This fork replaces WinRing0 with PawnIO.
 
-The whole thing would've been impossible without the work done in [NoteBook FanControl](https://github.com/hirschmann/nbfc) and [WinRing0 library](https://github.com/GermanAizek/WinRing0).
+Secure Boot can remain enabled.
 
-![ec-su_axb35-win-client](https://d7.wtf/s/ec-su_axb35-win-client.png)
+A Windows control and monitoring solution for the onboard Embedded Controller
+(ITE IT5570E) on [Sixunited SU_AXB35](https://strixhalo-homelab.d7.wtf/Hardware/Boards/Sixunited-AXB35)
+boards used by the GMKtec EVO-X2. It is a distant relative of
+[ec-su_axb35-linux](https://github.com/cmetz/ec-su_axb35-linux). One program,
+`evox2-control.exe`, is the window, the tray icon, and the CLI (`evox2ctl`).
 
+This application does not require Secure Boot to be disabled.
 
-## Features
-
-- **Full EC functionality**: Fan control (auto/fixed/curve) and monitoring, power control (3 standard presets), APU temperature reading
-- **HTTP REST API**: All requests and responses use JSON format
-- **Runs as a system service**: Very low memory footprint, doesn't do anything unless asked
-- **Client is optional**: Running a GUI monitoring/configuration tool is not required
-
+See [docs/PAWNIO_MIGRATION.md](docs/PAWNIO_MIGRATION.md) for the driver change.
 
 ## Requirements
 
-- EC Firmware 1.04 or higher (get it [here](https://strixhalo-homelab.d7.wtf/Hardware/Boards/Sixunited-AXB35/Firmware))
-- Windows 11 running on SU_AXB35 board (could work on W10 too, untested)
-- Administrator privileges for installation
-- Disabled Secure Boot for WinRing0 driver loading
+- GMKtec EVO-X2 / Sixunited AXB35 hardware
+- EC firmware 1.04 or higher
+- Windows 11 (Windows 10 is untested)
+- Official [PawnIO](https://pawnio.eu/) (signed release)
+- Administrator privileges to run the program
 
+Secure Boot, Test Signing, and Memory Integrity/HVCI can stay in their default
+secure configuration.
 
-## Usage
+## Installation
 
-In general you should need to worry about anything below that line, just download the installer, run it and follow the instructions. The GUI client allows you to monitor and edit all of the needed parameters, everything else is for advanced users.
+1. Install the official PawnIO release from https://pawnio.eu/.
+2. Run `ec-su_axb35-win-installer-2.0.0.exe` as Administrator, or copy the
+   release binaries from `dist/`.
+3. Double-click `evox2-control.exe`. That is the only program you need.
+4. Closing the window hides it to the tray by default. Curve monitoring keeps
+   running. Use the tray menu or Settings to quit. Power mode and fan settings
+   are written immediately and restored the next time the app starts.
 
-## Configuration & Logging
+If an older build left the `ec-su_axb35-win` Windows service running, stop and
+remove it so it does not keep a second copy in the background:
 
-The server loads configuration from `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`. If the file doesn't exist, it will be created with default values:
+```powershell
+sc.exe stop ec-su_axb35-win
+sc.exe delete ec-su_axb35-win
+```
+
+Do not install WinRing0, inpoutx64, or any unsigned kernel driver.
+
+## PawnIO
+
+PawnIO is an external official dependency. This project:
+
+- talks to `\\?\GLOBALROOT\Device\PawnIO`
+- loads the official signed `LpcACPIEC` module
+- uses only `ioctl_pio_read` / `ioctl_pio_write` on ports `0x62` and `0x66`
+
+It does not bundle `PawnIO.sys`, does not download kernel binaries at runtime,
+and does not use the unrestricted/test-signed PawnIO edition.
+
+If PawnIO is missing, the window shows a message in the current language and
+opens https://pawnio.eu/. It does not download a driver.
+
+## Secure Boot
+
+Secure Boot can remain **Enabled**. The application only reads the current
+state (`Secure Boot: Enabled`) and never attempts to change it.
+
+## GUI usage
+
+Double-click `evox2-control.exe` (Administrator). The GUI talks to the EC
+in-process. It does not need a separate server process.
+
+A second double-click focuses the existing window instead of opening another
+EC session.
+
+The APU block shows the current power mode and a selector:
+
+```text
+Current mode: Balanced
+
+Power Mode
+[ Quiet ] [ Balanced ] [ Performance ]
+```
+
+Fan blocks still support auto / fixed / curve, RPM, and temperature charts.
+
+### Tray
+
+Left-click the tray icon to show the window.
+
+Right-click for Quiet / Balanced / Performance, Show window, and Exit.
+
+### Settings
+
+On the same window:
+
+- Close window: minimize to tray (default) or quit the program
+- Start with Windows: off by default; writes `HKCU\...\Run` as `EVO-X2 Control`
+- Language: 中文 (default) or English
+
+There is no Windows service and no REST API.
+
+## CLI usage
+
+```powershell
+evox2ctl mode
+evox2ctl mode quiet
+evox2ctl mode balanced
+evox2ctl mode performance
+evox2ctl mode performance --dry-run
+evox2ctl status
+evox2ctl diagnose
+```
+
+Shortcuts can point at:
+
+```powershell
+evox2ctl.exe mode quiet
+evox2ctl.exe mode balanced
+evox2ctl.exe mode performance
+```
+
+`diagnose` does not change hardware state. CLI text follows the `language`
+value in `config.json`.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| `PawnIO is required for hardware access` | Install official PawnIO and reboot if needed |
+| `Unsupported EC firmware` | Update EC firmware to 1.04+ |
+| `Unsupported hardware` | Confirm the machine is AXB35 / EVO-X2 |
+| `EC timeout waiting for input buffer to clear` | Another EC client may be holding the ports |
+| GUI cannot start | Confirm PawnIO is installed, the app is elevated, and no leftover service is running |
+| Settings did not come back | `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json` |
+
+## Architecture
+
+```text
+evox2-control.exe     one window + tray, in-process EC
+   close window    → hide to tray (default) or exit
+   next launch     → restore config.json onto the EC
+   second launch   → show the existing window
+
+evox2ctl.exe          same binary, one-shot CLI
+```
+
+Configuration: `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`
 
 ```json
 {
   "host": "127.0.0.1",
   "port": 8395,
   "log_path": "C:\\ProgramData\\ec-su_axb35-win\\server.log",
-  "driver_path": "C:\\ProgramData\\ec-su_axb35-win\\winring0"
+  "close_to_tray": true,
+  "start_with_windows": false,
+  "language": "zh"
 }
 ```
 
-The server logs all operations with timestamps to:
-- Standard output (if run in a console)
-- Log file defined in the config
+`host` and `port` may remain in the file from older builds. They are not used.
 
-The log file is overwritten on each server restart.
+## Security
 
+- Treat EC control as privileged hardware access.
+- There is no network API.
+- The installer does not open Windows Firewall ports.
+- Unknown machines do not receive speculative EC writes.
 
-## Safety & Implementation Notes
+## Building from source
 
-- All EC operations are performed synchronously one by one
-- The server will exit if it cannot access the EC or load the required driver
-- All states are being kept on the server side in its config and re-applied on start
-- HTTP REST API does not have any authorization implemented, unless you're sure that this is what you want, never set the server to listen on public interfaces
+```powershell
+cargo test --workspace
+cargo build --workspace --release
+.\scripts\package.ps1
+```
 
+Optional installer: compile `installer.nsi` with NSIS after the release
+binaries exist.
 
-## API Endpoints
+CI runs `cargo fmt --check`, `clippy`, `test`, and a release build. Hardware
+tests are not run in CI.
 
-#### General
-- **GET** `/status` - Get EC firmware version and status
-- **GET** `/metrics` - Get combined monitoring data (power mode, temperature, all fan data)
+## Help
 
-#### APU Power Mode
-- **GET/POST** `/apu/power_mode` - Get or set current power mode (balanced/performance/quiet)
-- **GET** `/apu/temp` - Get APU temperature
+Issues: https://github.com/deseven/ec-su_axb35-win/issues/new
 
-#### Fan Control (X = 1, 2, or 3)
-- **GET** `/fanX/rpm` - Get fan RPM
-- **GET/POST** `/fanX/mode` - Get or set fan mode (auto/fixed/curve)
-- **GET/POST** `/fanX/level` - Get or set fan level (0-5) for `fixed` mode
-- **GET/POST** `/fanX/rampup_curve` - Get or set fan rampup curve (5 temperature thresholds) for `curve` mode
-- **GET/POST** `/fanX/rampdown_curve` - Get or set fan rampdown curve (5 temperature thresholds) for `curve` mode
-
-#### OpenAPI Specs
-
-There are [OpenAPI specifications available in the repo](https://raw.githubusercontent.com/deseven/ec-su_axb35-win/refs/heads/main/server/openapi.yaml) with full route descriptions and request/response examples. You can simply copy the URL and import it in [the Swagger Editor](https://editor.swagger.io/) or any other OpenAPI-compatible editor/viewer.
-
-
-## Curve Fan Mode
-
-The curve fan mode provides automatic fan speed control based on APU temperature using customizable temperature thresholds:
-
-- **Rampup curve**: 5 temperature thresholds (°C) that trigger fan level increases (levels 1-5)
-- **Rampdown curve**: 5 temperature thresholds (°C) that trigger fan level decreases (levels 1-5)
-- **Real-time monitoring**: Server continuously monitors APU temperature and adjusts fan speeds accordingly
-- **Hysteresis**: Separate rampup/rampdown curves prevent rapid fan speed oscillation
-- **Per-fan configuration**: Each fan (1, 2, 3) can have independent curve settings
-
-**Default Curve Values for Fan 1 & 2:**
-- Rampup: [60, 70, 83, 95, 97]°C
-- Rampdown: [40, 50, 80, 94, 96]°C
-
-**Default Curve Values for Fan 3:**
-- Rampup: [20, 60, 83, 95, 97]°C
-- Rampdown: [0, 50, 80, 94, 96]°C
-
-#### Curve Mode Operation
-
-1. Set fan mode to "curve" using the `/fanX/mode` endpoint
-2. Optionally customize rampup/rampdown curves using the curve endpoints
-3. Server automatically monitors APU temperature every second
-4. Fan levels adjust based on temperature crossing the configured thresholds
-5. All curve settings are saved to config and restored on server restart
-
-
-## Testing
-
-There are a couple of PoSh scripts available in `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\scripts`. Use them to quickly test metrics output and fan levels.
-
-
-## Building and Running
-
-1. Ensure you have Rust installed and you can build a simple "hello world" app.
-2. Build the project (from server or client dir):
-   ```bash
-   cargo build --release
-   ```
-3. Run as Administrator:
-   ```bash
-   cargo run --release
-   ```
-
-
-## Help, support and contributions
-If you found a bug, have a suggestion or some question, feel free to [create an issue](https://github.com/deseven/ec-su_axb35-win/issues/new) in this repo.
-
-There is also a Strix Halo HomeLab Discord server you can join - https://discord.gg/pnPRyucNrG
+Strix Halo HomeLab Discord: https://discord.gg/pnPRyucNrG

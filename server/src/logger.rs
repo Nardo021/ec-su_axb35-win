@@ -1,7 +1,7 @@
-use std::fs::{File, OpenOptions};
-use std::io::{Write, BufWriter};
-use std::path::Path;
 use chrono::Utc;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::path::Path;
 
 pub struct Logger {
     file_writer: Option<BufWriter<File>>,
@@ -32,6 +32,13 @@ impl Logger {
             file_writer: Some(file_writer),
             service_mode,
         })
+    }
+
+    pub fn silent() -> Self {
+        Logger {
+            file_writer: None,
+            service_mode: true,
+        }
     }
 
     fn log_message(&mut self, level: &str, message: &str) {
@@ -65,6 +72,7 @@ impl Logger {
         self.log_message("ERROR", message);
     }
 
+    #[allow(dead_code)]
     pub fn debug(&mut self, message: &str) {
         self.log_message("DEBUG", message);
     }
