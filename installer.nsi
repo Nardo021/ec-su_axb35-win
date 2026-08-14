@@ -1,7 +1,7 @@
 ; ec-su_axb35-win Installer
 
 !define PRODUCT_NAME "ec-su_axb35-win"
-!define PRODUCT_VERSION "1.2.1"
+!define PRODUCT_VERSION "2.0.0"
 !define PRODUCT_PUBLISHER "deseven"
 !define PRODUCT_WEB_SITE "https://github.com/deseven/ec-su_axb35-win"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\ec-su_axb35-server.exe"
@@ -14,7 +14,6 @@
 
 ; Installation directories
 !define INSTALL_DIR "$PROGRAMFILES64\ec-su_axb35-win"
-!define WINRING_DIR "$APPDATA\ec-su_axb35-win\winring0"
 
 ; Include required headers
 !include "MUI2.nsh"
@@ -60,7 +59,7 @@ ShowUnInstDetails show
 RequestExecutionLevel admin
 
 ; Version Information
-VIProductVersion "1.0.0.0"
+VIProductVersion "2.0.0.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "Comments" "EC SU_AXB35 WIN Installer"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
@@ -81,6 +80,11 @@ Function .onInit
     MessageBox MB_ICONSTOP "Administrator rights required!"
     SetErrorLevel 740 ; ERROR_ELEVATION_REQUIRED
     Quit
+  ${EndIf}
+
+  ReadRegStr $1 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO" "DisplayVersion"
+  ${If} $1 == ""
+    MessageBox MB_ICONEXCLAMATION "PawnIO was not detected.$\r$\n$\r$\nInstall the official signed PawnIO release from https://pawnio.eu/ before starting the service.$\r$\n$\r$\nSecure Boot can remain enabled. This installer does not bundle a kernel driver."
   ${EndIf}
 FunctionEnd
 
@@ -162,18 +166,13 @@ Section "MainSection" SEC01
   
   ; Install server binary
   DetailPrint "Installing server binary..."
-  File "server\target\release\ec-su_axb35-server.exe"
+  File "target\release\ec-su_axb35-server.exe"
+  File "/oname=evox2-control.exe" "target\release\ec-su_axb35-server.exe"
   
-  ; Install client binary
-  DetailPrint "Installing client binary..."
-  File "client\target\release\ec-su_axb35-win-client.exe"
-  
-  ; Create winring0 directory and install files
-  DetailPrint "Installing WinRing0 drivers..."
-  CreateDirectory "$APPDATA\ec-su_axb35-win\winring0"
-  SetOutPath "$APPDATA\ec-su_axb35-win\winring0"
-  File "server\winring0\WinRing0.sys"
-  File "server\winring0\WinRing0x64.sys"
+  ; Install client and CLI
+  DetailPrint "Installing client and CLI..."
+  File "target\release\ec-su_axb35-win-client.exe"
+  File "target\release\evox2ctl.exe"
   
   ; Create scripts directory and install scripts
   DetailPrint "Installing scripts..."
@@ -182,7 +181,6 @@ Section "MainSection" SEC01
   File "server\scripts\info.ps1"
   File "server\scripts\test_fan_mode_fixed.ps1"
   
-  ; Set proper permissions for winring0 directory using built-in commands
   ; The service will run as SYSTEM and should have access to PROGRAMDATA
   DetailPrint "Setting directory permissions..."
   
@@ -195,6 +193,9 @@ Section -AdditionalIcons
   WriteIniStr "$INSTDIR\${PRODUCT_NAME}.url" "InternetShortcut" "URL" "${PRODUCT_WEB_SITE}"
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\EC SU_AXB35 Client.lnk" "$INSTDIR\ec-su_axb35-win-client.exe"
+  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Quiet.lnk" "$INSTDIR\evox2ctl.exe" "mode quiet"
+  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Balanced.lnk" "$INSTDIR\evox2ctl.exe" "mode balanced"
+  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Performance.lnk" "$INSTDIR\evox2ctl.exe" "mode performance"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Website.lnk" "$INSTDIR\${PRODUCT_NAME}.url"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\uninst.exe"
 SectionEnd
@@ -249,12 +250,9 @@ Section Uninstall
   Delete "$INSTDIR\${PRODUCT_NAME}.url"
   Delete "$INSTDIR\uninst.exe"
   Delete "$INSTDIR\ec-su_axb35-server.exe"
+  Delete "$INSTDIR\evox2-control.exe"
+  Delete "$INSTDIR\evox2ctl.exe"
   Delete "$INSTDIR\ec-su_axb35-win-client.exe"
-  
-  ; Remove winring0 files
-  Delete "$APPDATA\ec-su_axb35-win\winring0\WinRing0.sys"
-  Delete "$APPDATA\ec-su_axb35-win\winring0\WinRing0x64.sys"
-  RMDir "$APPDATA\ec-su_axb35-win\winring0"
   
   ; Remove scripts files
   Delete "$APPDATA\ec-su_axb35-win\scripts\info.ps1"
@@ -265,6 +263,9 @@ Section Uninstall
   
   ; Remove shortcuts
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\EC SU_AXB35 Client.lnk"
+  Delete "$SMPROGRAMS\${PRODUCT_NAME}\Quiet.lnk"
+  Delete "$SMPROGRAMS\${PRODUCT_NAME}\Balanced.lnk"
+  Delete "$SMPROGRAMS\${PRODUCT_NAME}\Performance.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\Website.lnk"
   RMDir "$SMPROGRAMS\${PRODUCT_NAME}"

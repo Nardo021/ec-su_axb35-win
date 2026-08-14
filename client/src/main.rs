@@ -6,8 +6,8 @@ use eframe::egui;
 use image::GenericImageView;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::time::interval;
@@ -38,6 +38,8 @@ impl Default for Config {
 struct StatusResponse {
     status: i32,
     version: Option<String>,
+    #[serde(default)]
+    secure_boot: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -111,7 +113,7 @@ impl EditState {
     fn is_any_other_edit_mode_active_except_apu(&self) -> bool {
         self.fan1_edit_mode || self.fan2_edit_mode || self.fan3_edit_mode
     }
-    
+
     fn is_any_other_edit_mode_active_except_fan(&self, fan_id: i32) -> bool {
         match fan_id {
             1 => self.apu_edit_mode || self.fan2_edit_mode || self.fan3_edit_mode,
@@ -189,23 +191,23 @@ impl ChartData {
             fan3_rpm_history: VecDeque::with_capacity(CHART_HISTORY_SIZE),
         }
     }
-    
+
     fn add_data_point(&mut self, temp: i32, fan1_rpm: i32, fan2_rpm: i32, fan3_rpm: i32) {
         if self.temperature_history.len() >= CHART_HISTORY_SIZE {
             self.temperature_history.pop_front();
         }
         self.temperature_history.push_back(temp);
-        
+
         if self.fan1_rpm_history.len() >= CHART_HISTORY_SIZE {
             self.fan1_rpm_history.pop_front();
         }
         self.fan1_rpm_history.push_back(fan1_rpm);
-        
+
         if self.fan2_rpm_history.len() >= CHART_HISTORY_SIZE {
             self.fan2_rpm_history.pop_front();
         }
         self.fan2_rpm_history.push_back(fan2_rpm);
-        
+
         if self.fan3_rpm_history.len() >= CHART_HISTORY_SIZE {
             self.fan3_rpm_history.pop_front();
         }
@@ -218,6 +220,7 @@ struct AppState {
     config: Config,
     http_client: Client,
     ec_version: Option<String>,
+    secure_boot: Option<String>,
     metrics: Option<MetricsResponse>,
     last_update: Option<Instant>,
     error_message: Option<String>,
@@ -235,6 +238,7 @@ impl AppState {
             config,
             http_client: Client::new(),
             ec_version: None,
+            secure_boot: None,
             metrics: None,
             last_update: None,
             error_message: None,
@@ -248,7 +252,10 @@ impl AppState {
     }
 
     fn server_url(&self) -> String {
-        format!("http://{}:{}", self.config.server_ip, self.config.server_port)
+        format!(
+            "http://{}:{}",
+            self.config.server_ip, self.config.server_port
+        )
     }
 
     async fn check_status(&mut self) -> Result<()> {
@@ -265,12 +272,12 @@ impl AppState {
 
         if response.status == 1 {
             self.ec_version = response.version;
+            self.secure_boot = response.secure_boot;
             Ok(())
         } else {
             anyhow::bail!("EC status check failed")
         }
     }
-
 
     fn load_icons(&mut self, ctx: &egui::Context) {
         if self.cog_icon.is_none() {
@@ -281,10 +288,11 @@ impl AppState {
                     [width as usize, height as usize],
                     &rgba,
                 );
-                self.cog_icon = Some(ctx.load_texture("cog", color_image, egui::TextureOptions::default()));
+                self.cog_icon =
+                    Some(ctx.load_texture("cog", color_image, egui::TextureOptions::default()));
             }
         }
-        
+
         if self.check_icon.is_none() {
             if let Ok(img) = image::load_from_memory(CHECK_ICON_BYTES) {
                 let rgba = img.to_rgba8();
@@ -293,7 +301,8 @@ impl AppState {
                     [width as usize, height as usize],
                     &rgba,
                 );
-                self.check_icon = Some(ctx.load_texture("check", color_image, egui::TextureOptions::default()));
+                self.check_icon =
+                    Some(ctx.load_texture("check", color_image, egui::TextureOptions::default()));
             }
         }
     }
@@ -336,9 +345,12 @@ impl AppState {
         }
     }
 
-
     fn curve_to_string(&self, curve: &[i32]) -> String {
-        curve.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        curve
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     fn set_error(&mut self, message: String) {
@@ -384,21 +396,22 @@ impl EcMonitorApp {
             let mut interval = interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                
+
                 // Clone the HTTP client and config outside the lock
                 let (client, server_url) = {
                     let state_guard = state.lock().unwrap();
                     (state_guard.http_client.clone(), state_guard.server_url())
                 };
-                
+
                 // Make the HTTP request and parse JSON outside the lock
                 let url = format!("{}/metrics", server_url);
                 let result = async {
                     let response = client.get(&url).send().await?;
                     let metrics: MetricsResponse = response.json().await?;
                     Ok::<MetricsResponse, reqwest::Error>(metrics)
-                }.await;
-                
+                }
+                .await;
+
                 // Update state with the result
                 {
                     let mut state_guard = state.lock().unwrap();
@@ -411,7 +424,7 @@ impl EcMonitorApp {
                                 metrics.fan2.rpm,
                                 metrics.fan3.rpm,
                             );
-                            
+
                             state_guard.metrics = Some(metrics);
                             state_guard.last_update = Some(Instant::now());
                             // Don't clear error messages here - let them expire naturally after 5 seconds
@@ -449,32 +462,28 @@ impl EcMonitorApp {
         if history.is_empty() {
             return;
         }
-        
+
         let painter = ui.painter();
         let num_bars = history.len();
-        
+
         if num_bars == 0 {
             return;
         }
-        
+
         // Calculate bar width based on max capacity so bars fill width when at max
         let bar_width = rect.width() / CHART_HISTORY_SIZE as f32;
-        
+
         // Calculate how many bars fit in the rect
         let max_bars = (rect.width() / bar_width).floor() as usize;
-        
+
         // Determine which bars to draw (most recent ones)
-        let start_index = if num_bars > max_bars {
-            num_bars - max_bars
-        } else {
-            0
-        };
-        
+        let start_index = num_bars.saturating_sub(max_bars);
+
         // Draw bars from right to left, starting with the most recent
         for (i, &value) in history.iter().skip(start_index).enumerate() {
             let normalized_height = (value as f32 / max_value as f32).clamp(0.0, 1.0);
             let bar_height = rect.height() * normalized_height;
-            
+
             // Position bars from left to right within available space
             let x_offset = if num_bars <= max_bars {
                 // If we have fewer bars than max, align them to the left
@@ -483,18 +492,12 @@ impl EcMonitorApp {
                 // If we have more bars, fill from left to right
                 i as f32 * bar_width
             };
-            
+
             let bar_rect = egui::Rect::from_min_max(
-                egui::pos2(
-                    rect.min.x + x_offset,
-                    rect.max.y - bar_height,
-                ),
-                egui::pos2(
-                    rect.min.x + x_offset + bar_width,
-                    rect.max.y,
-                ),
+                egui::pos2(rect.min.x + x_offset, rect.max.y - bar_height),
+                egui::pos2(rect.min.x + x_offset + bar_width, rect.max.y),
             );
-            
+
             // Draw with 10% opacity
             let chart_color = egui::Color32::from_rgba_unmultiplied(
                 color.r(),
@@ -513,8 +516,9 @@ impl EcMonitorApp {
                     ui.heading("APU");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Only show button if this block is in edit mode OR no other block is in edit mode
-                        let can_show_button = state.edit_state.apu_edit_mode || !state.edit_state.is_any_other_edit_mode_active_except_apu();
-                        
+                        let can_show_button = state.edit_state.apu_edit_mode
+                            || !state.edit_state.is_any_other_edit_mode_active_except_apu();
+
                         if state.edit_state.apu_applying {
                             // Show spinner while applying
                             ui.add(egui::Spinner::new());
@@ -524,82 +528,108 @@ impl EcMonitorApp {
                             } else {
                                 &state.cog_icon
                             };
-                            
+
                             if let Some(texture) = icon {
-                                let image = egui::Image::from_texture(texture).fit_to_exact_size(egui::Vec2::new(16.0, 16.0));
+                                let image = egui::Image::from_texture(texture)
+                                    .fit_to_exact_size(egui::Vec2::new(16.0, 16.0));
                                 if ui.add(egui::Button::image(image).frame(false)).clicked() {
                                     if state.edit_state.apu_edit_mode {
                                         // Set applying state and spawn async task
                                         state.edit_state.apu_applying = true;
-                                        let power_mode = state.edit_state.temp_apu_power_mode.clone();
+                                        let power_mode =
+                                            state.edit_state.temp_apu_power_mode.clone();
                                         let state_clone = Arc::clone(&self.state);
                                         tokio::spawn(async move {
-                                        // Extract the HTTP client and server URL outside the lock
-                                        let (client, server_url) = {
-                                            let state_guard = state_clone.lock().unwrap();
-                                            (state_guard.http_client.clone(), state_guard.server_url())
-                                        };
-                                        
-                                        // Make the API call without holding the lock
-                                        let url = format!("{}/apu/power_mode", server_url);
-                                        let request = PowerModeRequest {
-                                            power_mode: power_mode.clone(),
-                                        };
-                                        
-                                        let result = client
-                                            .post(&url)
-                                            .json(&request)
-                                            .send()
-                                            .await;
-                                        
-                                        // Update state based on result
-                                        match result {
-                                            Ok(response) if response.status().is_success() => {
-                                                // Refresh metrics immediately after successful change
-                                                let metrics_url = format!("{}/metrics", server_url);
-                                                if let Ok(metrics_response) = client.get(&metrics_url).send().await {
-                                                    if let Ok(metrics) = metrics_response.json::<MetricsResponse>().await {
-                                                        let mut state_guard = state_clone.lock().unwrap();
-                                                        state_guard.metrics = Some(metrics);
-                                                        state_guard.last_update = Some(Instant::now());
-                                                        state_guard.edit_state.apu_edit_mode = false;
-                                                        state_guard.edit_state.apu_applying = false;
+                                            // Extract the HTTP client and server URL outside the lock
+                                            let (client, server_url) = {
+                                                let state_guard = state_clone.lock().unwrap();
+                                                (
+                                                    state_guard.http_client.clone(),
+                                                    state_guard.server_url(),
+                                                )
+                                            };
+
+                                            // Make the API call without holding the lock
+                                            let url = format!("{}/apu/power_mode", server_url);
+                                            let request = PowerModeRequest {
+                                                power_mode: power_mode.clone(),
+                                            };
+
+                                            let result =
+                                                client.post(&url).json(&request).send().await;
+
+                                            // Update state based on result
+                                            match result {
+                                                Ok(response) if response.status().is_success() => {
+                                                    // Refresh metrics immediately after successful change
+                                                    let metrics_url =
+                                                        format!("{}/metrics", server_url);
+                                                    if let Ok(metrics_response) =
+                                                        client.get(&metrics_url).send().await
+                                                    {
+                                                        if let Ok(metrics) = metrics_response
+                                                            .json::<MetricsResponse>()
+                                                            .await
+                                                        {
+                                                            let mut state_guard =
+                                                                state_clone.lock().unwrap();
+                                                            state_guard.metrics = Some(metrics);
+                                                            state_guard.last_update =
+                                                                Some(Instant::now());
+                                                            state_guard.edit_state.apu_edit_mode =
+                                                                false;
+                                                            state_guard.edit_state.apu_applying =
+                                                                false;
+                                                        } else {
+                                                            let mut state_guard =
+                                                                state_clone.lock().unwrap();
+                                                            state_guard.edit_state.apu_edit_mode =
+                                                                false;
+                                                            state_guard.edit_state.apu_applying =
+                                                                false;
+                                                        }
                                                     } else {
-                                                        let mut state_guard = state_clone.lock().unwrap();
-                                                        state_guard.edit_state.apu_edit_mode = false;
+                                                        let mut state_guard =
+                                                            state_clone.lock().unwrap();
+                                                        state_guard.edit_state.apu_edit_mode =
+                                                            false;
                                                         state_guard.edit_state.apu_applying = false;
                                                     }
-                                                } else {
-                                                    let mut state_guard = state_clone.lock().unwrap();
-                                                    state_guard.edit_state.apu_edit_mode = false;
+                                                }
+                                                Ok(response) => {
+                                                    let mut state_guard =
+                                                        state_clone.lock().unwrap();
+                                                    state_guard.set_error(format!(
+                                                        "Failed to set APU power mode: {}",
+                                                        response.status()
+                                                    ));
                                                     state_guard.edit_state.apu_applying = false;
+                                                    // Don't clear edit mode on error, let user see the error and try again
+                                                }
+                                                Err(e) => {
+                                                    let mut state_guard =
+                                                        state_clone.lock().unwrap();
+                                                    state_guard.set_error(format!(
+                                                        "Failed to set APU power mode: {}",
+                                                        e
+                                                    ));
+                                                    state_guard.edit_state.apu_applying = false;
+                                                    // Don't clear edit mode on error, let user see the error and try again
                                                 }
                                             }
-                                            Ok(response) => {
-                                                let mut state_guard = state_clone.lock().unwrap();
-                                                state_guard.set_error(format!("Failed to set APU power mode: {}", response.status()));
-                                                state_guard.edit_state.apu_applying = false;
-                                                // Don't clear edit mode on error, let user see the error and try again
-                                            }
-                                            Err(e) => {
-                                                let mut state_guard = state_clone.lock().unwrap();
-                                                state_guard.set_error(format!("Failed to set APU power mode: {}", e));
-                                                state_guard.edit_state.apu_applying = false;
-                                                // Don't clear edit mode on error, let user see the error and try again
-                                            }
-                                        }
                                         });
                                     } else {
                                         // Enter edit mode
                                         state.edit_state.apu_edit_mode = true;
-                                        state.edit_state.temp_apu_power_mode = metrics.power_mode.clone();
+                                        state.edit_state.temp_apu_power_mode =
+                                            metrics.power_mode.clone();
                                     }
                                 }
                             }
                         }
                     });
                 });
-                
+
                 if state.edit_state.apu_edit_mode {
                     // Edit mode UI
                     ui.horizontal(|ui| {
@@ -607,9 +637,21 @@ impl EcMonitorApp {
                         egui::ComboBox::from_label("")
                             .selected_text(&state.edit_state.temp_apu_power_mode)
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut state.edit_state.temp_apu_power_mode, "quiet".to_string(), "quiet");
-                                ui.selectable_value(&mut state.edit_state.temp_apu_power_mode, "balanced".to_string(), "balanced");
-                                ui.selectable_value(&mut state.edit_state.temp_apu_power_mode, "performance".to_string(), "performance");
+                                ui.selectable_value(
+                                    &mut state.edit_state.temp_apu_power_mode,
+                                    "quiet".to_string(),
+                                    "quiet",
+                                );
+                                ui.selectable_value(
+                                    &mut state.edit_state.temp_apu_power_mode,
+                                    "balanced".to_string(),
+                                    "balanced",
+                                );
+                                ui.selectable_value(
+                                    &mut state.edit_state.temp_apu_power_mode,
+                                    "performance".to_string(),
+                                    "performance",
+                                );
                             });
                     });
                 } else {
@@ -622,16 +664,36 @@ impl EcMonitorApp {
                         );
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Power Mode:");
+                        ui.label("Current mode:");
                         ui.colored_label(
                             state.get_power_mode_color(&metrics.power_mode),
-                            &metrics.power_mode,
+                            title_case_mode(&metrics.power_mode),
                         );
+                    });
+                    ui.label("Power Mode");
+                    ui.horizontal(|ui| {
+                        for (id, label) in [
+                            ("quiet", "Quiet"),
+                            ("balanced", "Balanced"),
+                            ("performance", "Performance"),
+                        ] {
+                            let selected = metrics.power_mode == id;
+                            if ui.selectable_label(selected, label).clicked()
+                                && !selected
+                                && !state.edit_state.apu_applying
+                            {
+                                state.edit_state.apu_applying = true;
+                                let state_clone = Arc::clone(&self.state);
+                                tokio::spawn(async move {
+                                    apply_power_mode(state_clone, id.to_string()).await;
+                                });
+                            }
+                        }
                     });
                 }
             })
         });
-        
+
         // Draw chart in the background after content is drawn, only if not in edit mode
         if !state.edit_state.apu_edit_mode {
             let mut rect = response.response.rect;
@@ -646,7 +708,14 @@ impl EcMonitorApp {
         }
     }
 
-    fn draw_fan_block_with_edit(&self, ui: &mut egui::Ui, fan_name: &str, fan_id: i32, fan: &FanMetrics, state: &mut AppState) {
+    fn draw_fan_block_with_edit(
+        &self,
+        ui: &mut egui::Ui,
+        fan_name: &str,
+        fan_id: i32,
+        fan: &FanMetrics,
+        state: &mut AppState,
+    ) {
         // Clone chart data and determine edit mode before the closure to avoid borrow issues
         let (history_clone, max_rpm) = match fan_id {
             1 => (state.chart_data.fan1_rpm_history.clone(), 5000),
@@ -654,14 +723,14 @@ impl EcMonitorApp {
             3 => (state.chart_data.fan3_rpm_history.clone(), 2500),
             _ => return, // Invalid fan_id
         };
-        
+
         let is_edit_mode = match fan_id {
             1 => state.edit_state.fan1_edit_mode,
             2 => state.edit_state.fan2_edit_mode,
             3 => state.edit_state.fan3_edit_mode,
             _ => false,
         };
-        
+
         let response = ui.group(|ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -673,17 +742,17 @@ impl EcMonitorApp {
                             3 => state.edit_state.fan3_edit_mode,
                             _ => false,
                         };
-                        
+
                         let is_applying = match fan_id {
                             1 => state.edit_state.fan1_applying,
                             2 => state.edit_state.fan2_applying,
                             3 => state.edit_state.fan3_applying,
                             _ => false,
                         };
-                        
+
                         // Only show button if this block is in edit mode OR no other block is in edit mode
                         let can_show_button = is_edit_mode || !state.edit_state.is_any_other_edit_mode_active_except_fan(fan_id);
-                        
+
                         if is_applying {
                             // Show spinner while applying
                             ui.add(egui::Spinner::new());
@@ -693,7 +762,7 @@ impl EcMonitorApp {
                             } else {
                                 &state.cog_icon
                             };
-                            
+
                             if let Some(texture) = icon {
                                 let image = egui::Image::from_texture(texture).fit_to_exact_size(egui::Vec2::new(16.0, 16.0));
                                 if ui.add(egui::Button::image(image).frame(false)).clicked() {
@@ -705,7 +774,7 @@ impl EcMonitorApp {
                                             3 => state.edit_state.fan3_applying = true,
                                             _ => return,
                                         };
-                                        
+
                                         let (mode, level, rampup_str, rampdown_str) = match fan_id {
                                             1 => (state.edit_state.temp_fan1_mode.clone(), state.edit_state.temp_fan1_level,
                                                   state.edit_state.temp_fan1_rampup.clone(), state.edit_state.temp_fan1_rampdown.clone()),
@@ -715,7 +784,7 @@ impl EcMonitorApp {
                                                   state.edit_state.temp_fan3_rampup.clone(), state.edit_state.temp_fan3_rampdown.clone()),
                                             _ => return,
                                         };
-                                        
+
                                         let state_clone = Arc::clone(&self.state);
                                     tokio::spawn(async move {
                                         // Extract the HTTP client and server URL outside the lock
@@ -723,17 +792,17 @@ impl EcMonitorApp {
                                             let state_guard = state_clone.lock().unwrap();
                                             (state_guard.http_client.clone(), state_guard.server_url())
                                         };
-                                        
+
                                         let mut success = true;
                                         let mut error_msg = None;
-                                        
+
                                         // Set fan mode
                                         if success {
                                             let url = format!("{}/fan{}/mode", server_url, fan_id);
                                             let request = FanModeRequest {
                                                 mode: mode.clone(),
                                             };
-                                            
+
                                             match client.post(&url).json(&request).send().await {
                                                 Ok(response) if response.status().is_success() => {},
                                                 Ok(response) => {
@@ -746,12 +815,12 @@ impl EcMonitorApp {
                                                 }
                                             }
                                         }
-                                        
+
                                         // Set level if in fixed mode and previous call succeeded
                                         if success && mode == "fixed" {
                                             let url = format!("{}/fan{}/level", server_url, fan_id);
                                             let request = FanLevelRequest { level };
-                                            
+
                                             match client.post(&url).json(&request).send().await {
                                                 Ok(response) if response.status().is_success() => {},
                                                 Ok(response) => {
@@ -764,7 +833,7 @@ impl EcMonitorApp {
                                                 }
                                             }
                                         }
-                                        
+
                                         // Set curves if in curve mode and previous calls succeeded
                                         if success && mode == "curve" {
                                             // Parse curves
@@ -776,7 +845,7 @@ impl EcMonitorApp {
                                                 .split(',')
                                                 .filter_map(|s| s.trim().parse().ok())
                                                 .collect();
-                                            
+
                                             if rampup_curve.len() != 5 {
                                                 success = false;
                                                 error_msg = Some("Rampup curve must have exactly 5 values".to_string());
@@ -787,7 +856,7 @@ impl EcMonitorApp {
                                                 // Set rampup curve
                                                 let url = format!("{}/fan{}/rampup_curve", server_url, fan_id);
                                                 let request = FanCurveRequest { curve: rampup_curve };
-                                                
+
                                                 match client.post(&url).json(&request).send().await {
                                                     Ok(response) if response.status().is_success() => {},
                                                     Ok(response) => {
@@ -799,12 +868,12 @@ impl EcMonitorApp {
                                                         error_msg = Some(format!("Failed to set rampup curve: {}", e));
                                                     }
                                                 }
-                                                
+
                                                 // Set rampdown curve if rampup succeeded
                                                 if success {
                                                     let url = format!("{}/fan{}/rampdown_curve", server_url, fan_id);
                                                     let request = FanCurveRequest { curve: rampdown_curve };
-                                                    
+
                                                     match client.post(&url).json(&request).send().await {
                                                         Ok(response) if response.status().is_success() => {},
                                                         Ok(response) => {
@@ -819,7 +888,7 @@ impl EcMonitorApp {
                                                 }
                                             }
                                         }
-                                        
+
                                         // Update UI state
                                         if success {
                                             // Refresh metrics immediately after successful change
@@ -924,14 +993,14 @@ impl EcMonitorApp {
                         }
                     });
                 });
-                
+
                 let is_edit_mode = match fan_id {
                     1 => state.edit_state.fan1_edit_mode,
                     2 => state.edit_state.fan2_edit_mode,
                     3 => state.edit_state.fan3_edit_mode,
                     _ => false,
                 };
-                
+
                 if is_edit_mode {
                     // Edit mode UI
                     match fan_id {
@@ -946,14 +1015,14 @@ impl EcMonitorApp {
                                         ui.selectable_value(&mut state.edit_state.temp_fan1_mode, "curve".to_string(), "curve");
                                     });
                             });
-                            
+
                             if state.edit_state.temp_fan1_mode == "fixed" {
                                 ui.horizontal(|ui| {
                                     ui.label("Level:");
                                     ui.add(egui::Slider::new(&mut state.edit_state.temp_fan1_level, 0..=5));
                                 });
                             }
-                            
+
                             if state.edit_state.temp_fan1_mode == "curve" {
                                 ui.horizontal(|ui| {
                                     ui.label("Ramp-Up:");
@@ -977,14 +1046,14 @@ impl EcMonitorApp {
                                         ui.selectable_value(&mut state.edit_state.temp_fan2_mode, "curve".to_string(), "curve");
                                     });
                             });
-                            
+
                             if state.edit_state.temp_fan2_mode == "fixed" {
                                 ui.horizontal(|ui| {
                                     ui.label("Level:");
                                     ui.add(egui::Slider::new(&mut state.edit_state.temp_fan2_level, 0..=5));
                                 });
                             }
-                            
+
                             if state.edit_state.temp_fan2_mode == "curve" {
                                 ui.horizontal(|ui| {
                                     ui.label("Ramp-Up:");
@@ -1008,14 +1077,14 @@ impl EcMonitorApp {
                                         ui.selectable_value(&mut state.edit_state.temp_fan3_mode, "curve".to_string(), "curve");
                                     });
                             });
-                            
+
                             if state.edit_state.temp_fan3_mode == "fixed" {
                                 ui.horizontal(|ui| {
                                     ui.label("Level:");
                                     ui.add(egui::Slider::new(&mut state.edit_state.temp_fan3_level, 0..=5));
                                 });
                             }
-                            
+
                             if state.edit_state.temp_fan3_mode == "curve" {
                                 ui.horizontal(|ui| {
                                     ui.label("Ramp-Up:");
@@ -1062,20 +1131,20 @@ impl EcMonitorApp {
                }
            })
        });
-       
-       // Draw chart in the background after content is drawn, only if not in edit mode
-       if !is_edit_mode {
-           let mut rect = response.response.rect;
-           rect.set_width(ui.available_width());
-           self.draw_bar_chart(
-               ui,
-               rect,
-               &history_clone,
-               max_rpm,
-               state.get_rpm_color(fan.rpm),
-           );
-       }
-   }
+
+        // Draw chart in the background after content is drawn, only if not in edit mode
+        if !is_edit_mode {
+            let mut rect = response.response.rect;
+            rect.set_width(ui.available_width());
+            self.draw_bar_chart(
+                ui,
+                rect,
+                &history_clone,
+                max_rpm,
+                state.get_rpm_color(fan.rpm),
+            );
+        }
+    }
 }
 
 impl eframe::App for EcMonitorApp {
@@ -1084,7 +1153,7 @@ impl eframe::App for EcMonitorApp {
         self.start_metrics_polling();
 
         let mut content_height = 0.0;
-        
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // Load icons first
             {
@@ -1106,6 +1175,12 @@ impl eframe::App for EcMonitorApp {
                     ui.label("EC firmware version:");
                     ui.label(version);
                 });
+                if let Some(secure_boot) = &state.secure_boot {
+                    ui.horizontal(|ui| {
+                        ui.label("Secure Boot:");
+                        ui.label(secure_boot);
+                    });
+                }
                 ui.separator();
             }
 
@@ -1126,7 +1201,6 @@ impl eframe::App for EcMonitorApp {
                 self.draw_fan_block_with_edit(ui, "Fan1", 1, &metrics.fan1, &mut state);
                 self.draw_fan_block_with_edit(ui, "Fan2", 2, &metrics.fan2, &mut state);
                 self.draw_fan_block_with_edit(ui, "Fan3", 3, &metrics.fan3, &mut state);
-
             } else {
                 ui.label("Loading metrics...");
             }
@@ -1140,14 +1214,14 @@ impl eframe::App for EcMonitorApp {
         let window_width = 400.0;
         let min_height = 200.0;
         let max_height = 800.0;
-        
+
         // Clamp the content height to reasonable bounds
         let target_height = content_height.max(min_height).min(max_height);
-        
+
         // Only update window size if content height changed significantly (avoid constant resizing)
         if !self.window_configured || (target_height - self.last_content_height).abs() > 5.0 {
             let window_size = egui::Vec2::new(window_width, target_height);
-            
+
             // Get screen dimensions for centering
             let screen_size = {
                 #[cfg(windows)]
@@ -1164,12 +1238,12 @@ impl eframe::App for EcMonitorApp {
                     [1920.0, 1080.0] // Default fallback
                 }
             };
-            
+
             // Calculate center position
             let center_x = (screen_size[0] - window_size.x) / 2.0;
             let center_y = (screen_size[1] - window_size.y) / 2.0;
             let window_pos = egui::Pos2::new(center_x, center_y);
-            
+
             // Set viewport properties
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(window_size));
             if !self.window_configured {
@@ -1177,7 +1251,7 @@ impl eframe::App for EcMonitorApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(window_pos));
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
-            
+
             self.last_content_height = target_height;
             self.window_configured = true;
         }
@@ -1191,6 +1265,60 @@ impl eframe::App for EcMonitorApp {
     }
 }
 
+async fn apply_power_mode(state_clone: Arc<Mutex<AppState>>, power_mode: String) {
+    let (client, server_url) = {
+        let state_guard = state_clone.lock().unwrap();
+        (state_guard.http_client.clone(), state_guard.server_url())
+    };
+
+    let url = format!("{}/apu/power_mode", server_url);
+    let request = PowerModeRequest {
+        power_mode: power_mode.clone(),
+    };
+
+    let result = client.post(&url).json(&request).send().await;
+    match result {
+        Ok(response) if response.status().is_success() => {
+            let metrics_url = format!("{}/metrics", server_url);
+            if let Ok(metrics_response) = client.get(&metrics_url).send().await {
+                if let Ok(metrics) = metrics_response.json::<MetricsResponse>().await {
+                    let mut state_guard = state_clone.lock().unwrap();
+                    state_guard.metrics = Some(metrics);
+                    state_guard.last_update = Some(Instant::now());
+                    state_guard.edit_state.apu_edit_mode = false;
+                    state_guard.edit_state.apu_applying = false;
+                    return;
+                }
+            }
+            let mut state_guard = state_clone.lock().unwrap();
+            state_guard.edit_state.apu_edit_mode = false;
+            state_guard.edit_state.apu_applying = false;
+        }
+        Ok(response) => {
+            let mut state_guard = state_clone.lock().unwrap();
+            state_guard.set_error(format!(
+                "Failed to set APU power mode: {}",
+                response.status()
+            ));
+            state_guard.edit_state.apu_applying = false;
+        }
+        Err(e) => {
+            let mut state_guard = state_clone.lock().unwrap();
+            state_guard.set_error(format!("Failed to set APU power mode: {e}"));
+            state_guard.edit_state.apu_applying = false;
+        }
+    }
+}
+
+fn title_case_mode(mode: &str) -> String {
+    match mode {
+        "quiet" => "Quiet".to_string(),
+        "balanced" => "Balanced".to_string(),
+        "performance" => "Performance".to_string(),
+        other => other.to_string(),
+    }
+}
+
 // Configuration management
 fn get_config_path() -> Result<PathBuf> {
     let config_dir = config_dir().context("Failed to get config directory")?;
@@ -1199,12 +1327,12 @@ fn get_config_path() -> Result<PathBuf> {
 
 fn load_config() -> Result<(Config, bool)> {
     let config_path = get_config_path()?;
-    
+
     if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)
-            .context("Failed to read config file")?;
-        let config: Config = serde_json::from_str(&content)
-            .context("Failed to parse config file")?;
+        let content =
+            std::fs::read_to_string(&config_path).context("Failed to read config file")?;
+        let config: Config =
+            serde_json::from_str(&content).context("Failed to parse config file")?;
         Ok((config, true))
     } else {
         Ok((Config::default(), false))
@@ -1213,17 +1341,14 @@ fn load_config() -> Result<(Config, bool)> {
 
 fn save_config(config: &Config) -> Result<()> {
     let config_path = get_config_path()?;
-    
+
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .context("Failed to create config directory")?;
+        std::fs::create_dir_all(parent).context("Failed to create config directory")?;
     }
-    
-    let content = serde_json::to_string_pretty(config)
-        .context("Failed to serialize config")?;
-    std::fs::write(&config_path, content)
-        .context("Failed to write config file")?;
-    
+
+    let content = serde_json::to_string_pretty(config).context("Failed to serialize config")?;
+    std::fs::write(&config_path, content).context("Failed to write config file")?;
+
     Ok(())
 }
 
@@ -1231,7 +1356,7 @@ fn save_config(config: &Config) -> Result<()> {
 async fn main() -> Result<()> {
     // Load or create configuration
     let (config, config_existed) = load_config()?;
-    
+
     // Save default config if it didn't exist
     if !config_existed {
         save_config(&config)?;
@@ -1239,18 +1364,18 @@ async fn main() -> Result<()> {
 
     // Create application state
     let mut app_state = AppState::new(config);
-    
+
     // Check server status
     if let Err(e) = app_state.check_status().await {
         eprintln!("Failed to connect to server: {}", e);
         #[cfg(windows)]
         {
-            use winapi::um::winuser::{MessageBoxA, MB_OK, MB_ICONERROR};
             use std::ffi::CString;
-            
+            use winapi::um::winuser::{MessageBoxA, MB_ICONERROR, MB_OK};
+
             let title = CString::new("EC Monitor Error").unwrap();
             let message = CString::new(format!("Server couldn't be reached: {}", e)).unwrap();
-            
+
             unsafe {
                 MessageBoxA(
                     std::ptr::null_mut(),
@@ -1264,10 +1389,10 @@ async fn main() -> Result<()> {
     }
 
     let state = Arc::new(Mutex::new(app_state));
-    
+
     // Create the application
     let app = EcMonitorApp::new(Arc::clone(&state));
-    
+
     // Load and configure the window icon
     let icon_data = match image::load_from_memory(ICON_BYTES) {
         Ok(img) => {
@@ -1275,8 +1400,8 @@ async fn main() -> Result<()> {
             let (width, height) = img.dimensions();
             Some(egui::IconData {
                 rgba: rgba.into_raw(),
-                width: width as u32,
-                height: height as u32,
+                width,
+                height,
             })
         }
         Err(e) => {
@@ -1297,10 +1422,9 @@ async fn main() -> Result<()> {
     eframe::run_native(
         "EC Monitor",
         options,
-        Box::new(move |_cc| {
-            Ok(Box::new(app))
-        }),
-    ).map_err(|e| anyhow::anyhow!("Failed to run application: {}", e))?;
+        Box::new(move |_cc| Ok(Box::new(app))),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to run application: {}", e))?;
 
     Ok(())
 }

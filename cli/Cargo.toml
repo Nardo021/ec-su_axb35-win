@@ -1,0 +1,11 @@
+[package]
+name = "evox2ctl"
+version = "2.0.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+winapi = { version = "0.3", features = ["winnt", "winerror", "handleapi", "fileapi", "processthreadsapi", "securitybaseapi", "winreg"] }
