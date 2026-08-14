@@ -1,7 +1,7 @@
-use std::fs::{File, OpenOptions};
-use std::io::{Write, BufWriter};
-use std::path::Path;
 use chrono::Utc;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::path::Path;
 
 pub struct Logger {
     file_writer: Option<BufWriter<File>>,

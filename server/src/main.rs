@@ -1,18 +1,13 @@
-
-use std::sync::{Arc, Mutex};
-use std::ptr;
 use std::ffi::CString;
-use std::time::Duration;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use winapi::um::winnt::TOKEN_ELEVATION;
-use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
-use winapi::um::securitybaseapi::GetTokenInformation;
-use winapi::um::winuser::MessageBoxA;
-use winapi::um::handleapi::CloseHandle;
+use winapi::um::consoleapi::GetConsoleMode;
 use winapi::um::processenv::GetStdHandle;
 use winapi::um::winbase::STD_OUTPUT_HANDLE;
-use winapi::um::consoleapi::GetConsoleMode;
+use winapi::um::winuser::MessageBoxA;
 
 use windows_service::{
     define_windows_service,
@@ -24,20 +19,32 @@ use windows_service::{
     service_dispatcher,
 };
 
+use clap::Parser;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use warp::Filter;
-use serde::{Deserialize, Serialize};
-use clap::Parser;
 
-mod ec;
 mod config;
+mod ec;
+mod ec_io;
+mod hardware;
 mod logger;
-mod driver;
+mod pawnio;
+mod platform;
 
-use ec::{EcController, EcOperation, EcResult};
-use config::ServerConfig;
+use config::{is_loopback_host, ServerConfig};
+use ec::{format_firmware_version, EcController, EcOperation, EcResult};
+use hardware::HardwareIdentity;
 use logger::Logger;
-use driver::DriverManager;
+use pawnio::{lpcacpiec_loaded, pawnio_connected, PawnIoBackend, PAWNIO_MISSING_MESSAGE};
+use platform::{is_admin, pawnio_install_version, secure_boot_status};
+
+type EcQueue = Arc<
+    mpsc::UnboundedSender<(
+        EcOperation,
+        tokio::sync::oneshot::Sender<Result<EcResult, String>>,
+    )>,
+>;
 
 #[derive(Parser, Debug)]
 #[command(name = "ec-su_axb35-server")]
@@ -57,12 +64,30 @@ static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
 // Service status handle wrapped in a mutex for thread safety
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
-static SERVICE_STATUS_HANDLE: OnceLock<StdMutex<Option<service_control_handler::ServiceStatusHandle>>> = OnceLock::new();
+static SERVICE_STATUS_HANDLE: OnceLock<
+    StdMutex<Option<service_control_handler::ServiceStatusHandle>>,
+> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct RuntimeStatus {
+    pawnio: String,
+    lpcacpiec: String,
+    secure_boot: String,
+    hardware: String,
+    hardware_supported: bool,
+    writes_allowed: bool,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StatusResponse {
     status: u8,
     version: Option<String>,
+    pawnio: Option<String>,
+    lpcacpiec: Option<String>,
+    secure_boot: Option<String>,
+    hardware: Option<String>,
+    hardware_supported: Option<bool>,
+    writes_allowed: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,35 +163,6 @@ struct ErrorResponse {
     error: String,
 }
 
-// Check if running as administrator
-fn is_admin() -> bool {
-    unsafe {
-        let mut token = ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), winapi::um::winnt::TOKEN_QUERY, &mut token) == 0 {
-            return false;
-        }
-
-        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
-        let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
-
-        let result = GetTokenInformation(
-            token,
-            winapi::um::winnt::TokenElevation,
-            &mut elevation as *mut _ as *mut _,
-            size,
-            &mut size,
-        );
-
-        CloseHandle(token);
-
-        if result == 0 {
-            return false;
-        }
-
-        elevation.TokenIsElevated != 0
-    }
-}
-
 // Check if we have an active TTY/console
 fn has_console() -> bool {
     unsafe {
@@ -174,7 +170,7 @@ fn has_console() -> bool {
         if stdout_handle.is_null() {
             return false;
         }
-        
+
         let mut console_mode = 0u32;
         GetConsoleMode(stdout_handle, &mut console_mode) != 0
     }
@@ -183,7 +179,7 @@ fn has_console() -> bool {
 fn show_error_and_exit(message: &str, service_mode: bool) -> ! {
     // Always log to stderr for service logs
     eprintln!("Error: {}", message);
-    
+
     // Only show GUI dialog if not in service mode and we have a console
     if !service_mode && has_console() {
         unsafe {
@@ -197,7 +193,7 @@ fn show_error_and_exit(message: &str, service_mode: bool) -> ! {
             );
         }
     }
-    
+
     std::process::exit(1);
 }
 
@@ -217,10 +213,10 @@ fn service_control_handler(control_event: ServiceControl) -> ServiceControlHandl
         ServiceControl::Stop => {
             // Log the service stop event to stderr for service logs
             eprintln!("Service stop requested - shutting down server");
-            
+
             // Signal the service to stop
             SHUTDOWN_SIGNAL.store(true, Ordering::SeqCst);
-            
+
             // Report that we're stopping
             if let Some(status_handle_mutex) = SERVICE_STATUS_HANDLE.get() {
                 if let Ok(status_handle_guard) = status_handle_mutex.lock() {
@@ -237,7 +233,7 @@ fn service_control_handler(control_event: ServiceControl) -> ServiceControlHandl
                     }
                 }
             }
-            
+
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -248,12 +244,13 @@ fn service_control_handler(control_event: ServiceControl) -> ServiceControlHandl
 // Run the service
 fn run_service() -> windows_service::Result<()> {
     // Initialize the global status handle storage
-    SERVICE_STATUS_HANDLE.set(StdMutex::new(None)).map_err(|_| {
-        windows_service::Error::Winapi(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to initialize service status handle storage"
-        ))
-    })?;
+    SERVICE_STATUS_HANDLE
+        .set(StdMutex::new(None))
+        .map_err(|_| {
+            windows_service::Error::Winapi(std::io::Error::other(
+                "Failed to initialize service status handle storage",
+            ))
+        })?;
 
     // Register service control handler
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
@@ -261,11 +258,11 @@ fn run_service() -> windows_service::Result<()> {
     };
 
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
-    
+
     // Store the status handle globally
     if let Some(status_handle_mutex) = SERVICE_STATUS_HANDLE.get() {
         if let Ok(mut status_handle_guard) = status_handle_mutex.lock() {
-            *status_handle_guard = Some(status_handle.clone());
+            *status_handle_guard = Some(status_handle);
         }
     }
 
@@ -282,10 +279,10 @@ fn run_service() -> windows_service::Result<()> {
 
     // Create a new Tokio runtime for the service
     let rt = tokio::runtime::Runtime::new().unwrap();
-    
+
     // Create a shutdown channel for graceful shutdown
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    
+
     // Spawn a task to monitor the shutdown signal
     let shutdown_monitor = rt.spawn(async move {
         loop {
@@ -296,7 +293,7 @@ fn run_service() -> windows_service::Result<()> {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
-    
+
     // Run the server with shutdown signal
     rt.block_on(async {
         tokio::select! {
@@ -307,7 +304,7 @@ fn run_service() -> windows_service::Result<()> {
 
     // Log service shutdown completion
     eprintln!("Service shutdown completed");
-    
+
     // Tell the system that service has stopped
     status_handle.set_service_status(ServiceStatus {
         service_type: SERVICE_TYPE,
@@ -318,7 +315,7 @@ fn run_service() -> windows_service::Result<()> {
         wait_hint: Duration::default(),
         process_id: None,
     })?;
-    
+
     // Clear the global status handle
     if let Some(status_handle_mutex) = SERVICE_STATUS_HANDLE.get() {
         if let Ok(mut status_handle_guard) = status_handle_mutex.lock() {
@@ -333,7 +330,7 @@ fn run_service() -> windows_service::Result<()> {
 async fn main() {
     // Parse command line arguments
     let args = Args::parse();
-    
+
     // Check if we're being started by the Service Control Manager
     if args.service || !has_console() {
         // We're running as a service
@@ -342,25 +339,26 @@ async fn main() {
         }
         return;
     }
-    
+
     // We're running in console mode - set up Ctrl+C handler
     let shutdown_signal = Arc::new(AtomicBool::new(false));
     let shutdown_signal_clone = shutdown_signal.clone();
-    
+
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for Ctrl+C");
         eprintln!("User interrupt received (Ctrl+C) - shutting down server");
         shutdown_signal_clone.store(true, Ordering::SeqCst);
     });
-    
+
     run_server_console(false, shutdown_signal).await;
 }
-
 
 async fn run_server_console(service_mode: bool, shutdown_signal: Arc<AtomicBool>) {
     // Create a shutdown channel that triggers when the signal is set
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    
+
     // Spawn a task to monitor the shutdown signal
     tokio::spawn(async move {
         loop {
@@ -371,22 +369,30 @@ async fn run_server_console(service_mode: bool, shutdown_signal: Arc<AtomicBool>
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
-    
+
     run_server_with_shutdown(service_mode, shutdown_rx).await;
 }
 
-async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::oneshot::Receiver<()>) {
-
+async fn run_server_with_shutdown(
+    service_mode: bool,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
     // Check admin privileges first
     if !is_admin() {
-        show_error_and_exit("This application must be run as Administrator to access the EC driver.", service_mode);
+        show_error_and_exit(
+            "This application must be run as Administrator to access the EC through PawnIO.",
+            service_mode,
+        );
     }
 
     // Load configuration
     let config = match ServerConfig::load() {
         Ok(config) => Arc::new(Mutex::new(config)),
         Err(e) => {
-            show_error_and_exit(&format!("Failed to load configuration: {}", e), service_mode);
+            show_error_and_exit(
+                &format!("Failed to load configuration: {}", e),
+                service_mode,
+            );
         }
     };
 
@@ -406,45 +412,74 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
         let mut log = logger.lock().unwrap();
         log.info("EC Server starting up...");
         let config_guard = config.lock().unwrap();
-        log.info(&format!("Listening on {}:{}", config_guard.host, config_guard.port));
+        log.info(&format!(
+            "Listening on {}:{}",
+            config_guard.host, config_guard.port
+        ));
     }
 
-    // Initialize driver manager
-    let driver_manager = {
-        let config_guard = config.lock().unwrap();
-        DriverManager::new(&config_guard.driver_path)
-    };
-    
-    // Check if driver is loaded or try to load it
-    if !driver_manager.is_driver_loaded() {
-        {
-            let mut log = logger.lock().unwrap();
-            log.info("WinRing0 driver not loaded, attempting to load...");
-        }
-        
-        if let Err(e) = driver_manager.install_and_load_driver() {
-            let error_msg = format!("Failed to load WinRing0 driver: {}. Make sure the driver files are in the correct location.", e);
+    if let Some(version) = pawnio_install_version() {
+        let mut log = logger.lock().unwrap();
+        log.info(&format!("PawnIO installer version {version}"));
+    }
+
+    if !pawnio::probe_device_present() {
+        let mut log = logger.lock().unwrap();
+        log.error("PawnIO unavailable");
+        show_error_and_exit(PAWNIO_MISSING_MESSAGE, service_mode);
+    }
+
+    let pawnio_backend = match PawnIoBackend::connect() {
+        Ok(backend) => {
             {
                 let mut log = logger.lock().unwrap();
+                log.info("PawnIO connected");
+                log.info("LpcACPIEC module loaded");
+                if let Ok(version) = backend.driver_version() {
+                    log.info(&format!(
+                        "PawnIO driver version {}.{}.{}",
+                        (version >> 16) & 0xFF,
+                        (version >> 8) & 0xFF,
+                        version & 0xFF
+                    ));
+                }
+            }
+            backend
+        }
+        Err(e) => {
+            let error_msg = if e.contains("PawnIO is required") {
+                e
+            } else {
+                format!("{PAWNIO_MISSING_MESSAGE}\n\n{e}")
+            };
+            {
+                let mut log = logger.lock().unwrap();
+                log.error("PawnIO unavailable");
                 log.error(&error_msg);
             }
             show_error_and_exit(&error_msg, service_mode);
         }
-        
-        {
-            let mut log = logger.lock().unwrap();
-            log.info("WinRing0 driver loaded successfully");
-        }
-    } else {
+    };
+
+    let hardware = HardwareIdentity::detect();
+    {
         let mut log = logger.lock().unwrap();
-        log.info("WinRing0 driver already loaded");
+        log.info(&format!("Detected hardware: {}", hardware.summary()));
+        if hardware.is_supported_axb35() {
+            log.info("EVO-X2 EC platform identified");
+        } else {
+            log.warn(&format!(
+                "Hardware '{}' is not a known Sixunited AXB35 / GMKtec EVO-X2 board. EC writes will be refused.",
+                hardware.summary()
+            ));
+        }
+        log.info(&format!("Secure Boot: {}", secure_boot_status()));
     }
 
-    // Initialize EC controller
-    let ec_controller = match EcController::new() {
+    let ec_controller = match EcController::initialize(pawnio_backend, hardware.clone()) {
         Ok(controller) => Arc::new(controller),
         Err(e) => {
-            let error_msg = format!("Failed to initialize EC controller: {}", e);
+            let error_msg = format!("Failed to initialize EC controller: {e}");
             {
                 let mut log = logger.lock().unwrap();
                 log.error(&error_msg);
@@ -456,69 +491,135 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
     {
         let mut log = logger.lock().unwrap();
         log.info("EC controller initialized successfully");
+        if pawnio_connected() && lpcacpiec_loaded() {
+            log.info("EVO-X2 EC detected");
+        }
     }
+
+    let runtime_status = Arc::new(RuntimeStatus {
+        pawnio: if pawnio_connected() {
+            "connected".to_string()
+        } else {
+            "unavailable".to_string()
+        },
+        lpcacpiec: if lpcacpiec_loaded() {
+            "loaded".to_string()
+        } else {
+            "not loaded".to_string()
+        },
+        secure_boot: secure_boot_status(),
+        hardware: ec_controller.hardware().summary(),
+        hardware_supported: ec_controller.hardware().is_supported_axb35(),
+        writes_allowed: ec_controller.writes_allowed(),
+    });
 
     // Restore saved parameters from config
     {
         let mut log = logger.lock().unwrap();
         log.info("Restoring saved parameters from configuration...");
     }
-    
-    let config_guard = config.lock().unwrap();
-    
-    // Restore APU power mode if saved
-    if let Some(ref power_mode) = config_guard.apu_power_mode {
-        if ec_controller.execute_operation(EcOperation::SetApuPowerMode(power_mode.clone())).await.is_ok() {
+
+    let (saved_power_mode, saved_fan1, saved_fan2, saved_fan3) = {
+        let config_guard = config.lock().unwrap();
+        (
+            config_guard.apu_power_mode.clone(),
+            config_guard.fan1.clone(),
+            config_guard.fan2.clone(),
+            config_guard.fan3.clone(),
+        )
+    };
+
+    if !ec_controller.writes_allowed() {
+        let mut log = logger.lock().unwrap();
+        log.warn("Skipping configuration restore because EC writes are disabled");
+    } else if let Some(ref power_mode) = saved_power_mode {
+        if ec_controller
+            .execute_operation(EcOperation::SetApuPowerMode(power_mode.clone()))
+            .await
+            .is_ok()
+        {
             let mut log = logger.lock().unwrap();
             log.info(&format!("Restored APU power mode: {}", power_mode));
         }
     }
-    
-    // Restore fan configurations
-    let fan_configs = [&config_guard.fan1, &config_guard.fan2, &config_guard.fan3];
-    for (fan_id, fan_config_opt) in fan_configs.iter().enumerate() {
-        let fan_id = (fan_id + 1) as u8;
-        
-        if let Some(fan_config) = fan_config_opt {
-            // Restore fan mode
-            if ec_controller.execute_operation(EcOperation::SetFanMode(fan_id, fan_config.mode.clone())).await.is_ok() {
-                let mut log = logger.lock().unwrap();
-                log.info(&format!("Restored Fan{} mode: {}", fan_id, fan_config.mode));
-            }
-            
-            // Restore fan level if not in auto mode
-            if fan_config.mode != "auto" {
-                if ec_controller.execute_operation(EcOperation::SetFanLevel(fan_id, fan_config.level)).await.is_ok() {
+
+    if ec_controller.writes_allowed() {
+        let fan_configs = [&saved_fan1, &saved_fan2, &saved_fan3];
+        for (fan_id, fan_config_opt) in fan_configs.iter().enumerate() {
+            let fan_id = (fan_id + 1) as u8;
+
+            if let Some(fan_config) = fan_config_opt {
+                if ec_controller
+                    .execute_operation(EcOperation::SetFanMode(fan_id, fan_config.mode.clone()))
+                    .await
+                    .is_ok()
+                {
                     let mut log = logger.lock().unwrap();
-                    log.info(&format!("Restored Fan{} level: {}", fan_id, fan_config.level));
+                    log.info(&format!("Restored Fan{} mode: {}", fan_id, fan_config.mode));
                 }
-            }
-            
-            // Restore fan curves
-            if ec_controller.execute_operation(EcOperation::SetFanRampupCurve(fan_id, fan_config.rampup_curve)).await.is_ok() {
+
+                if fan_config.mode != "auto"
+                    && ec_controller
+                        .execute_operation(EcOperation::SetFanLevel(fan_id, fan_config.level))
+                        .await
+                        .is_ok()
+                {
+                    let mut log = logger.lock().unwrap();
+                    log.info(&format!(
+                        "Restored Fan{} level: {}",
+                        fan_id, fan_config.level
+                    ));
+                }
+
+                if ec_controller
+                    .execute_operation(EcOperation::SetFanRampupCurve(
+                        fan_id,
+                        fan_config.rampup_curve,
+                    ))
+                    .await
+                    .is_ok()
+                {
+                    let mut log = logger.lock().unwrap();
+                    log.info(&format!(
+                        "Restored Fan{} rampup curve: {:?}",
+                        fan_id, fan_config.rampup_curve
+                    ));
+                }
+
+                if ec_controller
+                    .execute_operation(EcOperation::SetFanRampdownCurve(
+                        fan_id,
+                        fan_config.rampdown_curve,
+                    ))
+                    .await
+                    .is_ok()
+                {
+                    let mut log = logger.lock().unwrap();
+                    log.info(&format!(
+                        "Restored Fan{} rampdown curve: {:?}",
+                        fan_id, fan_config.rampdown_curve
+                    ));
+                }
+            } else {
                 let mut log = logger.lock().unwrap();
-                log.info(&format!("Restored Fan{} rampup curve: {:?}", fan_id, fan_config.rampup_curve));
+                log.info(&format!(
+                    "Fan{} configuration not found in config, leaving in original state",
+                    fan_id
+                ));
             }
-            
-            if ec_controller.execute_operation(EcOperation::SetFanRampdownCurve(fan_id, fan_config.rampdown_curve)).await.is_ok() {
-                let mut log = logger.lock().unwrap();
-                log.info(&format!("Restored Fan{} rampdown curve: {:?}", fan_id, fan_config.rampdown_curve));
-            }
-        } else {
-            let mut log = logger.lock().unwrap();
-            log.info(&format!("Fan{} configuration not found in config, leaving in original state", fan_id));
         }
     }
-    
-    drop(config_guard);
-    
+
     {
         let mut log = logger.lock().unwrap();
         log.info("Parameter restoration completed");
     }
 
     // Create EC operation queue
-    let (tx, mut rx) = mpsc::unbounded_channel::<(EcOperation, tokio::sync::oneshot::Sender<Result<EcResult, String>>)>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<(
+        EcOperation,
+        tokio::sync::oneshot::Sender<Result<EcResult, String>>,
+    )>();
     let ec_queue = Arc::new(tx);
 
     // Spawn EC operation handler task
@@ -527,7 +628,7 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
     tokio::spawn(async move {
         while let Some((operation, response_tx)) = rx.recv().await {
             let result = ec_controller_clone.execute_operation(operation).await;
-            
+
             // Log the operation
             {
                 let mut log = logger_clone.lock().unwrap();
@@ -536,7 +637,7 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
                     Err(e) => log.warn(&format!("EC operation failed: {}", e)),
                 }
             }
-            
+
             let _ = response_tx.send(result);
         }
     });
@@ -547,12 +648,12 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
         let mut curve_monitoring_active = false;
-        
+
         loop {
             interval.tick().await;
-            
+
             let has_curve_fans = ec_controller_curve.has_curve_fans();
-            
+
             // Log when curve monitoring starts or stops
             if has_curve_fans && !curve_monitoring_active {
                 let mut log = logger_curve.lock().unwrap();
@@ -563,7 +664,7 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
                 log.info("Curve monitoring stopped - no fans in curve mode");
                 curve_monitoring_active = false;
             }
-            
+
             // Only run curve logic if any fans are in curve mode
             if has_curve_fans {
                 match ec_controller_curve.update_curve_fans() {
@@ -590,12 +691,17 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
     let ec_queue_filter = warp::any().map(move || ec_queue.clone());
     let config_clone_for_filter = config.clone();
     let config_filter = warp::any().map(move || config_clone_for_filter.clone());
+    let runtime_status_filter = {
+        let runtime_status = runtime_status.clone();
+        warp::any().map(move || runtime_status.clone())
+    };
 
     // GET /status
     let status_route = warp::path("status")
         .and(warp::get())
         .and(logger_filter.clone())
         .and(ec_queue_filter.clone())
+        .and(runtime_status_filter.clone())
         .and_then(handle_status);
 
     // GET /metrics
@@ -839,7 +945,12 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
         .or(fan_rampup_curve_post_routes)
         .or(fan_rampdown_curve_get_routes)
         .or(fan_rampdown_curve_post_routes)
-        .with(warp::cors().allow_any_origin().allow_headers(vec!["content-type"]).allow_methods(vec!["GET", "POST"]));
+        .with(
+            warp::cors()
+                .allow_any_origin()
+                .allow_headers(vec!["content-type"])
+                .allow_methods(vec!["GET", "POST"]),
+        );
 
     {
         let mut log = logger.lock().unwrap();
@@ -849,24 +960,30 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
     // Parse host address
     let (host_addr, port) = {
         let config_guard = config.lock().unwrap();
-        let host_addr: std::net::IpAddr = config_guard.host.parse()
-            .unwrap_or_else(|_| {
-                let error_msg = format!("Invalid host address in config: {}", config_guard.host);
-                {
-                    let mut log = logger.lock().unwrap();
-                    log.error(&error_msg);
-                }
-                show_error_and_exit(&error_msg, service_mode);
-            });
+        if !is_loopback_host(&config_guard.host) {
+            let mut log = logger.lock().unwrap();
+            log.warn(&format!(
+                "SECURITY: binding unauthenticated hardware-control API to {}. Do not expose this to the LAN or Internet.",
+                config_guard.host
+            ));
+        }
+        let host_addr: std::net::IpAddr = config_guard.host.parse().unwrap_or_else(|_| {
+            let error_msg = format!("Invalid host address in config: {}", config_guard.host);
+            {
+                let mut log = logger.lock().unwrap();
+                log.error(&error_msg);
+            }
+            show_error_and_exit(&error_msg, service_mode);
+        });
         (host_addr, config_guard.port)
     };
 
     // Start server with graceful shutdown
-    let server_result = warp::serve(routes)
-        .try_bind_with_graceful_shutdown((host_addr, port), async move {
+    let server_result =
+        warp::serve(routes).try_bind_with_graceful_shutdown((host_addr, port), async move {
             shutdown_rx.await.ok();
         });
-    
+
     let (_addr, server) = match server_result {
         Ok(server) => server,
         Err(e) => {
@@ -879,9 +996,9 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
             std::process::exit(1);
         }
     };
-    
+
     server.await;
-    
+
     // Log shutdown
     {
         let mut log = logger.lock().unwrap();
@@ -892,11 +1009,15 @@ async fn run_server_with_shutdown(service_mode: bool, shutdown_rx: tokio::sync::
 // Handler functions
 async fn handle_status(
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
+    runtime_status: Arc<RuntimeStatus>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::GetFirmwareVersion, tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::GetFirmwareVersion, tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -907,21 +1028,23 @@ async fn handle_status(
 
     match rx.await {
         Ok(Ok(EcResult::FirmwareVersion { major, minor })) => {
-            let version = if minor < 10 {
-                format!("{}.0{}", major, minor)
-            } else {
-                format!("{}.{}", major, minor)
-            };
-            
+            let version = format_firmware_version(major, minor);
+
             {
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Status check: EC firmware version {}", version));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&StatusResponse {
                     status: 1,
                     version: Some(version),
+                    pawnio: Some(runtime_status.pawnio.clone()),
+                    lpcacpiec: Some(runtime_status.lpcacpiec.clone()),
+                    secure_boot: Some(runtime_status.secure_boot.clone()),
+                    hardware: Some(runtime_status.hardware.clone()),
+                    hardware_supported: Some(runtime_status.hardware_supported),
+                    writes_allowed: Some(runtime_status.writes_allowed),
                 }),
                 warp::http::StatusCode::OK,
             ))
@@ -931,11 +1054,17 @@ async fn handle_status(
                 let mut log = logger.lock().unwrap();
                 log.warn(&format!("Status check failed: {}", e));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&StatusResponse {
                     status: 0,
                     version: None,
+                    pawnio: Some(runtime_status.pawnio.clone()),
+                    lpcacpiec: Some(runtime_status.lpcacpiec.clone()),
+                    secure_boot: Some(runtime_status.secure_boot.clone()),
+                    hardware: Some(runtime_status.hardware.clone()),
+                    hardware_supported: Some(runtime_status.hardware_supported),
+                    writes_allowed: Some(runtime_status.writes_allowed),
                 }),
                 warp::http::StatusCode::OK,
             ))
@@ -957,10 +1086,10 @@ async fn handle_status(
 
 async fn handle_apu_power_mode_get(
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
+
     if ec_queue.send((EcOperation::GetApuPowerMode, tx)).is_err() {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
@@ -976,7 +1105,7 @@ async fn handle_apu_power_mode_get(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("APU power mode get: {}", mode));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&PowerModeResponse { power_mode: mode }),
                 warp::http::StatusCode::OK,
@@ -1004,12 +1133,15 @@ async fn handle_apu_power_mode_get(
 async fn handle_apu_power_mode_post(
     request: PowerModeRequest,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
     config: Arc<Mutex<ServerConfig>>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::SetApuPowerMode(request.power_mode.clone()), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::SetApuPowerMode(request.power_mode.clone()), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1022,9 +1154,12 @@ async fn handle_apu_power_mode_post(
         Ok(Ok(EcResult::ApuPowerMode(mode))) => {
             {
                 let mut log = logger.lock().unwrap();
-                log.info(&format!("APU power mode set to: {}", mode));
+                log.info(&format!(
+                    "power mode changed: {} -> {}",
+                    request.power_mode, mode
+                ));
             }
-            
+
             // Save to config
             {
                 let mut config_guard = config.lock().unwrap();
@@ -1034,7 +1169,7 @@ async fn handle_apu_power_mode_post(
                     log.warn(&format!("Failed to save APU power mode to config: {}", e));
                 }
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&PowerModeResponse { power_mode: mode }),
                 warp::http::StatusCode::OK,
@@ -1061,10 +1196,10 @@ async fn handle_apu_power_mode_post(
 
 async fn handle_apu_temp(
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
+
     if ec_queue.send((EcOperation::GetApuTemperature, tx)).is_err() {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
@@ -1080,7 +1215,7 @@ async fn handle_apu_temp(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("APU temperature: {}°C", temp));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&TemperatureResponse { temperature: temp }),
                 warp::http::StatusCode::OK,
@@ -1107,7 +1242,7 @@ async fn handle_apu_temp(
 
 async fn handle_metrics(
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     {
         let mut log = logger.lock().unwrap();
@@ -1129,27 +1264,43 @@ async fn handle_metrics(
     // Get power mode
     let power_mode = match execute_operation(EcOperation::GetApuPowerMode).await {
         Ok(EcResult::ApuPowerMode(mode)) => mode,
-        Ok(_) => return Ok(warp::reply::with_status(
-            warp::reply::json(&ErrorResponse { error: "Unexpected response type for power mode".to_string() }),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-        Err(e) => return Ok(warp::reply::with_status(
-            warp::reply::json(&ErrorResponse { error: format!("Failed to get power mode: {}", e) }),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
+        Ok(_) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse {
+                    error: "Unexpected response type for power mode".to_string(),
+                }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
+        Err(e) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse {
+                    error: format!("Failed to get power mode: {}", e),
+                }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
     };
 
     // Get temperature
     let temperature = match execute_operation(EcOperation::GetApuTemperature).await {
         Ok(EcResult::ApuTemperature(temp)) => temp,
-        Ok(_) => return Ok(warp::reply::with_status(
-            warp::reply::json(&ErrorResponse { error: "Unexpected response type for temperature".to_string() }),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-        Err(e) => return Ok(warp::reply::with_status(
-            warp::reply::json(&ErrorResponse { error: format!("Failed to get temperature: {}", e) }),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
+        Ok(_) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse {
+                    error: "Unexpected response type for temperature".to_string(),
+                }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
+        Err(e) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse {
+                    error: format!("Failed to get temperature: {}", e),
+                }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
     };
 
     // Helper function to get fan metrics
@@ -1179,7 +1330,8 @@ async fn handle_metrics(
         };
 
         // Get rampdown curve
-        let rampdown_curve = match execute_operation(EcOperation::GetFanRampdownCurve(fan_id)).await {
+        let rampdown_curve = match execute_operation(EcOperation::GetFanRampdownCurve(fan_id)).await
+        {
             Ok(EcResult::FanRampdownCurve(curve)) => curve,
             _ => return Err(format!("Failed to get Fan{} rampdown curve", fan_id)),
         };
@@ -1196,26 +1348,32 @@ async fn handle_metrics(
     // Get metrics for all fans
     let fan1 = match get_fan_metrics(1).await {
         Ok(metrics) => metrics,
-        Err(e) => return Ok(warp::reply::with_status(
-            warp::reply::json(&ErrorResponse { error: e }),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
+        Err(e) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse { error: e }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
     };
 
     let fan2 = match get_fan_metrics(2).await {
         Ok(metrics) => metrics,
-        Err(e) => return Ok(warp::reply::with_status(
-            warp::reply::json(&ErrorResponse { error: e }),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
+        Err(e) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse { error: e }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
     };
 
     let fan3 = match get_fan_metrics(3).await {
         Ok(metrics) => metrics,
-        Err(e) => return Ok(warp::reply::with_status(
-            warp::reply::json(&ErrorResponse { error: e }),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
+        Err(e) => {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse { error: e }),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
     };
 
     let metrics = MetricsResponse {
@@ -1240,10 +1398,10 @@ async fn handle_metrics(
 async fn handle_fan_rpm(
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
+
     if ec_queue.send((EcOperation::GetFanRpm(fan_id), tx)).is_err() {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
@@ -1259,7 +1417,7 @@ async fn handle_fan_rpm(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} RPM: {}", fan_id, rpm));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanRpmResponse { rpm }),
                 warp::http::StatusCode::OK,
@@ -1287,11 +1445,14 @@ async fn handle_fan_rpm(
 async fn handle_fan_mode_get(
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::GetFanMode(fan_id), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::GetFanMode(fan_id), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1306,7 +1467,7 @@ async fn handle_fan_mode_get(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} mode: {}", fan_id, mode));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanModeResponse { mode }),
                 warp::http::StatusCode::OK,
@@ -1335,12 +1496,15 @@ async fn handle_fan_mode_post(
     request: FanModeRequest,
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
     config: Arc<Mutex<ServerConfig>>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::SetFanMode(fan_id, request.mode.clone()), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::SetFanMode(fan_id, request.mode.clone()), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1355,7 +1519,7 @@ async fn handle_fan_mode_post(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} mode set to: {}", fan_id, mode));
             }
-            
+
             // Save to config
             {
                 let mut config_guard = config.lock().unwrap();
@@ -1363,26 +1527,33 @@ async fn handle_fan_mode_post(
                     1 => &mut config_guard.fan1,
                     2 => &mut config_guard.fan2,
                     3 => &mut config_guard.fan3,
-                    _ => return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrorResponse { error: "Invalid fan ID".to_string() }),
-                        warp::http::StatusCode::BAD_REQUEST,
-                    )),
+                    _ => {
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&ErrorResponse {
+                                error: "Invalid fan ID".to_string(),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        ))
+                    }
                 };
-                
+
                 // Create fan config if it doesn't exist
                 if fan_config_opt.is_none() {
                     *fan_config_opt = Some(config::FanConfig::default());
                 }
-                
+
                 if let Some(fan_config) = fan_config_opt {
                     fan_config.mode = mode.clone();
                     if let Err(e) = config_guard.save() {
                         let mut log = logger.lock().unwrap();
-                        log.warn(&format!("Failed to save Fan{} mode to config: {}", fan_id, e));
+                        log.warn(&format!(
+                            "Failed to save Fan{} mode to config: {}",
+                            fan_id, e
+                        ));
                     }
                 }
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanModeResponse { mode }),
                 warp::http::StatusCode::OK,
@@ -1411,11 +1582,14 @@ async fn handle_fan_mode_post(
 async fn handle_fan_rampup_curve_get(
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::GetFanRampupCurve(fan_id), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::GetFanRampupCurve(fan_id), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1430,7 +1604,7 @@ async fn handle_fan_rampup_curve_get(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} rampup curve get: {:?}", fan_id, curve));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanCurveResponse { curve }),
                 warp::http::StatusCode::OK,
@@ -1459,12 +1633,15 @@ async fn handle_fan_rampup_curve_post(
     request: FanCurveRequest,
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
     config: Arc<Mutex<ServerConfig>>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::SetFanRampupCurve(fan_id, request.curve), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::SetFanRampupCurve(fan_id, request.curve), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1479,7 +1656,7 @@ async fn handle_fan_rampup_curve_post(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} rampup curve set to: {:?}", fan_id, curve));
             }
-            
+
             // Save to config
             {
                 let mut config_guard = config.lock().unwrap();
@@ -1487,26 +1664,33 @@ async fn handle_fan_rampup_curve_post(
                     1 => &mut config_guard.fan1,
                     2 => &mut config_guard.fan2,
                     3 => &mut config_guard.fan3,
-                    _ => return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrorResponse { error: "Invalid fan ID".to_string() }),
-                        warp::http::StatusCode::BAD_REQUEST,
-                    )),
+                    _ => {
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&ErrorResponse {
+                                error: "Invalid fan ID".to_string(),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        ))
+                    }
                 };
-                
+
                 // Create fan config if it doesn't exist
                 if fan_config_opt.is_none() {
                     *fan_config_opt = Some(config::FanConfig::default());
                 }
-                
+
                 if let Some(fan_config) = fan_config_opt {
                     fan_config.rampup_curve = curve;
                     if let Err(e) = config_guard.save() {
                         let mut log = logger.lock().unwrap();
-                        log.warn(&format!("Failed to save Fan{} rampup curve to config: {}", fan_id, e));
+                        log.warn(&format!(
+                            "Failed to save Fan{} rampup curve to config: {}",
+                            fan_id, e
+                        ));
                     }
                 }
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanCurveResponse { curve }),
                 warp::http::StatusCode::OK,
@@ -1534,11 +1718,14 @@ async fn handle_fan_rampup_curve_post(
 async fn handle_fan_rampdown_curve_get(
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::GetFanRampdownCurve(fan_id), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::GetFanRampdownCurve(fan_id), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1553,7 +1740,7 @@ async fn handle_fan_rampdown_curve_get(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} rampdown curve get: {:?}", fan_id, curve));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanCurveResponse { curve }),
                 warp::http::StatusCode::OK,
@@ -1582,12 +1769,15 @@ async fn handle_fan_rampdown_curve_post(
     request: FanCurveRequest,
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<std::result::Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
     config: Arc<Mutex<ServerConfig>>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::SetFanRampdownCurve(fan_id, request.curve), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::SetFanRampdownCurve(fan_id, request.curve), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1602,7 +1792,7 @@ async fn handle_fan_rampdown_curve_post(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} rampdown curve set to: {:?}", fan_id, curve));
             }
-            
+
             // Save to config
             {
                 let mut config_guard = config.lock().unwrap();
@@ -1610,26 +1800,33 @@ async fn handle_fan_rampdown_curve_post(
                     1 => &mut config_guard.fan1,
                     2 => &mut config_guard.fan2,
                     3 => &mut config_guard.fan3,
-                    _ => return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrorResponse { error: "Invalid fan ID".to_string() }),
-                        warp::http::StatusCode::BAD_REQUEST,
-                    )),
+                    _ => {
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&ErrorResponse {
+                                error: "Invalid fan ID".to_string(),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        ))
+                    }
                 };
-                
+
                 // Create fan config if it doesn't exist
                 if fan_config_opt.is_none() {
                     *fan_config_opt = Some(config::FanConfig::default());
                 }
-                
+
                 if let Some(fan_config) = fan_config_opt {
                     fan_config.rampdown_curve = curve;
                     if let Err(e) = config_guard.save() {
                         let mut log = logger.lock().unwrap();
-                        log.warn(&format!("Failed to save Fan{} rampdown curve to config: {}", fan_id, e));
+                        log.warn(&format!(
+                            "Failed to save Fan{} rampdown curve to config: {}",
+                            fan_id, e
+                        ));
                     }
                 }
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanCurveResponse { curve }),
                 warp::http::StatusCode::OK,
@@ -1657,11 +1854,14 @@ async fn handle_fan_rampdown_curve_post(
 async fn handle_fan_level_get(
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::GetFanLevel(fan_id), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::GetFanLevel(fan_id), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1676,7 +1876,7 @@ async fn handle_fan_level_get(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} level: {}", fan_id, level));
             }
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanLevelResponse { level }),
                 warp::http::StatusCode::OK,
@@ -1705,12 +1905,15 @@ async fn handle_fan_level_post(
     request: FanLevelRequest,
     fan_id: u8,
     logger: Arc<Mutex<Logger>>,
-    ec_queue: Arc<mpsc::UnboundedSender<(EcOperation, tokio::sync::oneshot::Sender<Result<EcResult, String>>)>>,
+    ec_queue: EcQueue,
     config: Arc<Mutex<ServerConfig>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    
-    if ec_queue.send((EcOperation::SetFanLevel(fan_id, request.level), tx)).is_err() {
+
+    if ec_queue
+        .send((EcOperation::SetFanLevel(fan_id, request.level), tx))
+        .is_err()
+    {
         return Ok(warp::reply::with_status(
             warp::reply::json(&ErrorResponse {
                 error: "EC queue unavailable".to_string(),
@@ -1725,7 +1928,7 @@ async fn handle_fan_level_post(
                 let mut log = logger.lock().unwrap();
                 log.info(&format!("Fan{} level set to: {}", fan_id, level));
             }
-            
+
             // Save to config
             {
                 let mut config_guard = config.lock().unwrap();
@@ -1733,27 +1936,33 @@ async fn handle_fan_level_post(
                     1 => &mut config_guard.fan1,
                     2 => &mut config_guard.fan2,
                     3 => &mut config_guard.fan3,
-                    _ => return Ok(warp::reply::with_status(
-                        warp::reply::json(&ErrorResponse { error: "Invalid fan ID".to_string() }),
-                        warp::http::StatusCode::BAD_REQUEST,
-                    )),
+                    _ => {
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&ErrorResponse {
+                                error: "Invalid fan ID".to_string(),
+                            }),
+                            warp::http::StatusCode::BAD_REQUEST,
+                        ))
+                    }
                 };
-                
+
                 // Create fan config if it doesn't exist
                 if fan_config_opt.is_none() {
                     *fan_config_opt = Some(config::FanConfig::default());
                 }
-                
+
                 if let Some(fan_config) = fan_config_opt {
                     fan_config.level = level;
                     if let Err(e) = config_guard.save() {
                         let mut log = logger.lock().unwrap();
-                        log.warn(&format!("Failed to save Fan{} level to config: {}", fan_id, e));
+                        log.warn(&format!(
+                            "Failed to save Fan{} level to config: {}",
+                            fan_id, e
+                        ));
                     }
                 }
             }
-            
-            
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&FanLevelResponse { level }),
                 warp::http::StatusCode::OK,
