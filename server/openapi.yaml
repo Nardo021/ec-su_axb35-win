@@ -12,9 +12,10 @@ info:
     
     ## Safety & Implementation Notes
     - All EC operations are performed synchronously one by one
-    - The server will exit if it cannot access the EC or load the required driver
+    - The server will exit if it cannot access the EC through official PawnIO
     - All states are being kept on the server side in its config and re-applied on start
     - HTTP REST API does not have any authorization implemented
+    - Do not expose the unauthenticated REST API directly to the Internet
     
     ## Error Handling
     The server returns appropriate HTTP status codes:
@@ -52,6 +53,12 @@ paths:
                   value:
                     status: 1
                     version: "1.04"
+                    pawnio: connected
+                    lpcacpiec: loaded
+                    secure_boot: Enabled
+                    hardware: GMKtec EVO-X2
+                    hardware_supported: true
+                    writes_allowed: true
                 failure:
                   summary: Failed status check
                   value:
@@ -471,6 +478,31 @@ components:
           description: EC firmware version (null if status is 0)
           pattern: '^\d+\.\d+$'
           example: "1.04"
+        pawnio:
+          type: string
+          nullable: true
+          description: PawnIO connection state
+          example: connected
+        lpcacpiec:
+          type: string
+          nullable: true
+          description: Official LpcACPIEC module state
+          example: loaded
+        secure_boot:
+          type: string
+          nullable: true
+          description: Informational Secure Boot state
+          example: Enabled
+        hardware:
+          type: string
+          nullable: true
+          description: Detected system/board identity
+        hardware_supported:
+          type: boolean
+          nullable: true
+        writes_allowed:
+          type: boolean
+          nullable: true
 
     PowerModeResponse:
       type: object

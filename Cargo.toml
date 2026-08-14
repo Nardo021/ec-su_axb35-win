@@ -1,0 +1,6 @@
+[workspace]
+members = ["server", "client", "cli"]
+resolver = "2"
+
+[profile.release]
+debug = false
