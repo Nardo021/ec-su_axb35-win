@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
+            throw "Tag '$tag' must look like v2.0.1"
+          }
+          $expected = $Matches[1]
+          $cargo = Select-String -Path server/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1
+          $actual = $cargo.Matches.Groups[1].Value
+          if ($actual -ne $expected) {
+            throw "Tag $tag does not match server/Cargo.toml version $actual"
+          }
+
+      - name: Build
+        run: cargo build --workspace --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\evox2-control.exe dist\evox2-control.exe -Force
+          Copy-Item target\release\evox2-control.exe dist\evox2ctl.exe -Force
+          Compress-Archive `
+            -Path dist\evox2-control.exe, dist\evox2ctl.exe `
+            -DestinationPath "dist\evox2-control-$tag.zip" `
+            -Force
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag `
+            dist\evox2-control.exe `
+            dist\evox2ctl.exe `
+            "dist\evox2-control-$tag.zip" `
+            --title "EVO-X2 Control $tag" `
+            --generate-notes

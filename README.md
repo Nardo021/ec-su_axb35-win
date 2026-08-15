@@ -28,8 +28,9 @@ secure configuration.
 ## Installation
 
 1. Install the official PawnIO release from https://pawnio.eu/.
-2. Run `ec-su_axb35-win-installer-2.0.0.exe` as Administrator, or copy the
-   release binaries from `dist/`.
+2. Download the latest [GitHub Release](https://github.com/Nardo021/ec-su_axb35-win/releases),
+   run `ec-su_axb35-win-installer-2.0.0.exe` as Administrator, or copy the
+   binaries from `dist/`.
 3. Double-click `evox2-control.exe`. That is the only program you need.
 4. Closing the window hides it to the tray by default. Curve monitoring keeps
    running. Use the tray menu or Settings to quit. Power mode and fan settings
@@ -184,6 +185,20 @@ Configuration: `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`
 - There is no network API.
 - The installer does not open Windows Firewall ports.
 - Unknown machines do not receive speculative EC writes.
+
+## Publishing a release
+
+Push a version tag after `server/Cargo.toml` has the same version. GitHub
+Actions builds the Windows binaries and publishes a Release:
+
+```powershell
+# bump version in server/Cargo.toml first, then:
+git tag v2.0.1
+git push origin v2.0.1
+```
+
+The tag must look like `v2.0.1` and match Cargo. The Release includes
+`evox2-control.exe`, `evox2ctl.exe`, and a zip of both. PawnIO is not bundled.
 
 ## Building from source
 
