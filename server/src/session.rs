@@ -9,6 +9,7 @@ use crate::hardware::HardwareIdentity;
 use crate::logger::Logger;
 use crate::pawnio::{lpcacpiec_loaded, pawnio_connected, PawnIoBackend, PAWNIO_MISSING_MESSAGE};
 use crate::platform::{is_admin, pawnio_install_version, secure_boot_status, InstanceGuard};
+use crate::thermal::TemperatureSource;
 
 pub type LiveController = Arc<EcController<PawnIoBackend>>;
 
@@ -34,6 +35,7 @@ pub struct FanSnapshot {
 pub struct MetricsSnapshot {
     pub power_mode: String,
     pub temperature: u8,
+    pub temperature_source: TemperatureSource,
     pub fans: [FanSnapshot; 3],
 }
 
@@ -139,6 +141,9 @@ impl AppSession {
             if pawnio_connected() && lpcacpiec_loaded() {
                 log.info("EVO-X2 EC detected");
             }
+            if let Ok(ec_temp) = controller.read_ec_apu_temperature() {
+                log.info(&crate::thermal::describe_source(ec_temp));
+            }
         }
 
         let runtime = Arc::new(RuntimeStatus {
@@ -194,9 +199,11 @@ impl AppSession {
     }
 
     pub fn metrics(&self) -> Result<MetricsSnapshot, String> {
+        let (temperature, temperature_source) = self.temperature_reading()?;
         Ok(MetricsSnapshot {
             power_mode: self.power_mode()?,
-            temperature: self.temperature()?,
+            temperature,
+            temperature_source,
             fans: [
                 self.fan_snapshot(1)?,
                 self.fan_snapshot(2)?,
@@ -242,14 +249,9 @@ impl AppSession {
         Ok(applied)
     }
 
-    pub fn temperature(&self) -> Result<u8, String> {
-        match self
-            .controller
-            .execute_operation(EcOperation::GetApuTemperature)?
-        {
-            EcResult::ApuTemperature(temp) => Ok(temp),
-            _ => Err("Unexpected temperature response".to_string()),
-        }
+    fn temperature_reading(&self) -> Result<(u8, TemperatureSource), String> {
+        let ec = self.controller.read_ec_apu_temperature()?;
+        Ok(crate::thermal::resolve_with_source(ec))
     }
 
     pub fn fan_snapshot(&self, fan_id: u8) -> Result<FanSnapshot, String> {

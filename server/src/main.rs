@@ -20,6 +20,7 @@ mod logger;
 mod pawnio;
 mod platform;
 mod session;
+mod thermal;
 mod tray;
 
 use cli::Args;
