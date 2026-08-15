@@ -9,7 +9,7 @@ use crate::hardware::HardwareIdentity;
 use crate::logger::Logger;
 use crate::pawnio::{lpcacpiec_loaded, pawnio_connected, PawnIoBackend, PAWNIO_MISSING_MESSAGE};
 use crate::platform::{is_admin, pawnio_install_version, secure_boot_status, InstanceGuard};
-use crate::thermal::TemperatureSource;
+use crate::thermal::{TemperatureSource, ThermalSnapshot};
 
 pub type LiveController = Arc<EcController<PawnIoBackend>>;
 
@@ -36,6 +36,11 @@ pub struct MetricsSnapshot {
     pub power_mode: String,
     pub temperature: u8,
     pub temperature_source: TemperatureSource,
+    pub gpu_temp: Option<u8>,
+    pub cpu_temp: Option<u8>,
+    pub soc_temp: Option<u8>,
+    pub hotspot_temp: Option<u8>,
+    pub ec_raw_temp: u8,
     pub fans: [FanSnapshot; 3],
 }
 
@@ -84,7 +89,7 @@ impl AppSession {
 
         {
             let mut log = logger.lock().unwrap();
-            log.info("EVO-X2 Control starting");
+            log.info(&format!("{} starting", crate::i18n::APP_NAME));
             log.info("Single-process GUI mode");
             if let Some(version) = pawnio_install_version() {
                 log.info(&format!("PawnIO installer version {version}"));
@@ -135,6 +140,7 @@ impl AppSession {
         }
 
         let controller = Arc::new(EcController::initialize(backend, hardware)?);
+        controller.set_preferred_temperature(config.lock().unwrap().temperature_source());
         {
             let mut log = logger.lock().unwrap();
             log.info("EC controller initialized successfully");
@@ -142,7 +148,10 @@ impl AppSession {
                 log.info("EVO-X2 EC detected");
             }
             if let Ok(ec_temp) = controller.read_ec_apu_temperature() {
-                log.info(&crate::thermal::describe_source(ec_temp));
+                log.info(&crate::thermal::describe_source(
+                    ec_temp,
+                    controller.preferred_temperature(),
+                ));
             }
         }
 
@@ -185,7 +194,7 @@ impl AppSession {
         self.logger
             .lock()
             .unwrap()
-            .info("EVO-X2 Control shutting down");
+            .info(&format!("{} shutting down", crate::i18n::APP_NAME));
     }
 
     pub fn firmware_version(&self) -> Result<String, String> {
@@ -199,11 +208,16 @@ impl AppSession {
     }
 
     pub fn metrics(&self) -> Result<MetricsSnapshot, String> {
-        let (temperature, temperature_source) = self.temperature_reading()?;
+        let thermal = self.thermal_reading()?;
         Ok(MetricsSnapshot {
             power_mode: self.power_mode()?,
-            temperature,
-            temperature_source,
+            temperature: thermal.control,
+            temperature_source: thermal.control_source,
+            gpu_temp: thermal.gpu,
+            cpu_temp: thermal.cpu,
+            soc_temp: thermal.soc,
+            hotspot_temp: thermal.hotspot,
+            ec_raw_temp: thermal.ec_raw,
             fans: [
                 self.fan_snapshot(1)?,
                 self.fan_snapshot(2)?,
@@ -249,9 +263,12 @@ impl AppSession {
         Ok(applied)
     }
 
-    fn temperature_reading(&self) -> Result<(u8, TemperatureSource), String> {
+    fn thermal_reading(&self) -> Result<ThermalSnapshot, String> {
         let ec = self.controller.read_ec_apu_temperature()?;
-        Ok(crate::thermal::resolve_with_source(ec))
+        Ok(crate::thermal::read_thermal(
+            ec,
+            self.controller.preferred_temperature(),
+        ))
     }
 
     pub fn fan_snapshot(&self, fan_id: u8) -> Result<FanSnapshot, String> {
@@ -396,7 +413,7 @@ impl AppSession {
                 self.logger
                     .lock()
                     .unwrap()
-                    .info(&format!("Restored APU power mode: {mode}"));
+                    .info(&format!("Restored power mode: {mode}"));
             }
         }
 
@@ -485,5 +502,11 @@ impl AppSession {
                 .unwrap()
                 .warn(&format!("Failed to save Fan{fan_id} config: {error}"));
         }
+    }
+
+    pub fn set_fan_name(&self, fan_id: u8, name: Option<String>) {
+        self.update_fan_config(fan_id, |fan| {
+            fan.name = name.as_deref().and_then(crate::fan::sanitize_name);
+        });
     }
 }

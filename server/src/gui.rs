@@ -15,11 +15,12 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::alert::{should_fire_temp_alert, TEMP_ALERT_MAX, TEMP_ALERT_MIN};
 use crate::config::{program_data_dir, PortableConfig};
-use crate::diagnose::{DiagnoseReport, REPO_URL};
+use crate::diagnose::{DiagnoseReport, AUTHOR, REPO_URL, UPSTREAM_URL};
 use crate::fan;
 use crate::i18n::{t, Language};
 use crate::platform::{pick_json_file, set_start_with_windows, shell_open, ui_chrome, UiChrome};
 use crate::session::{AppSession, FanSnapshot, MetricsSnapshot};
+use crate::thermal::TemperatureSource;
 use crate::tray::TrayEvent;
 
 const ICON_BYTES: &[u8] = include_bytes!("../assets/ec-su_axb35-win.png");
@@ -148,6 +149,8 @@ struct EditState {
     temp_fan_rampup: [String; 3],
     temp_fan_rampdown: [String; 3],
     curve_dirty: [bool; 3],
+    renaming_fan: [bool; 3],
+    temp_fan_name: [String; 3],
 }
 
 impl Default for EditState {
@@ -168,6 +171,8 @@ impl Default for EditState {
                 "0,50,80,94,96".into(),
             ],
             curve_dirty: [false; 3],
+            renaming_fan: [false; 3],
+            temp_fan_name: [String::new(), String::new(), String::new()],
         }
     }
 }
@@ -737,7 +742,7 @@ fn draw_apu(
 ) {
     card(theme).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.heading("APU");
+            ui.heading(t(lang, "processor"));
             if state.edit.apu_applying {
                 ui.add(egui::Spinner::new().size(14.0));
             }
@@ -765,6 +770,14 @@ fn draw_apu(
                         .color(theme.muted),
                 );
             });
+        });
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            sensor_chip(ui, theme, "GPU", metrics.gpu_temp);
+            sensor_chip(ui, theme, "CPU", metrics.cpu_temp);
+            sensor_chip(ui, theme, "SoC", metrics.soc_temp);
+            sensor_chip(ui, theme, "Hotspot", metrics.hotspot_temp);
+            sensor_chip(ui, theme, "EC", Some(metrics.ec_raw_temp));
         });
         ui.add_space(8.0);
         ui.label(
@@ -806,7 +819,15 @@ fn draw_fan(
     state: &mut UiState,
     shared: &Arc<Mutex<UiState>>,
 ) {
-    let name = t(lang, fan::title_key((index + 1) as u8));
+    let default_name = t(lang, fan::title_key((index + 1) as u8));
+    let custom_name = state
+        .session
+        .config
+        .lock()
+        .unwrap()
+        .fan_custom_name((index + 1) as u8);
+    let name = fan::display_name(custom_name.as_deref(), default_name);
+    let has_custom = custom_name.is_some();
     let fan = &metrics.fans[index];
     let history = state.charts.fans[index].clone();
     let max_rpm = if index == 2 { 2500 } else { 5000 };
@@ -821,10 +842,43 @@ fn draw_fan(
 
     card(theme).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.heading(name);
-            ui.label(RichText::new(t(lang, &fan.mode)).small().color(theme.muted));
-            if applying {
-                ui.add(egui::Spinner::new().size(14.0));
+            if state.edit.renaming_fan[index] {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.edit.temp_fan_name[index])
+                        .desired_width((ui.available_width() - 108.0).max(72.0))
+                        .hint_text(default_name),
+                );
+                if !response.has_focus() && !response.lost_focus() {
+                    response.request_focus();
+                }
+                let restore = ui.small_button(t(lang, "restore_default")).clicked();
+                let enter =
+                    response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+                if restore {
+                    persist_fan_name(state, index, None);
+                    state.edit.renaming_fan[index] = false;
+                } else if escape {
+                    state.edit.renaming_fan[index] = false;
+                } else if enter || response.lost_focus() {
+                    persist_fan_name(state, index, Some(state.edit.temp_fan_name[index].clone()));
+                    state.edit.renaming_fan[index] = false;
+                }
+            } else {
+                ui.heading(&name);
+                ui.label(RichText::new(t(lang, &fan.mode)).small().color(theme.muted));
+                if applying {
+                    ui.add(egui::Spinner::new().size(14.0));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if has_custom && ui.small_button(t(lang, "restore_default")).clicked() {
+                        persist_fan_name(state, index, None);
+                    }
+                    if ui.small_button(t(lang, "rename")).clicked() {
+                        state.edit.temp_fan_name[index] = name.clone();
+                        state.edit.renaming_fan[index] = true;
+                    }
+                });
             }
         });
         ui.add_space(6.0);
@@ -948,6 +1002,7 @@ fn draw_settings(
     let mut close_to_tray;
     let mut start_with_windows;
     let mut language;
+    let mut temperature_source;
     let mut temp_alert_enabled;
     let mut temp_alert_celsius;
     {
@@ -955,11 +1010,13 @@ fn draw_settings(
         close_to_tray = config.close_to_tray;
         start_with_windows = config.start_with_windows;
         language = config.language.clone();
+        temperature_source = config.temperature_source.clone();
         temp_alert_enabled = config.temp_alert_enabled;
         temp_alert_celsius = i32::from(config.temp_alert_celsius);
     }
 
     card(theme).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
         ui.label(RichText::new(t(lang, "close_window")).color(theme.text));
         ui.add_space(4.0);
         segmented(ui, theme, 2, |ui, width| {
@@ -1014,6 +1071,33 @@ fn draw_settings(
         });
         hairline(ui, theme);
         settings_row(ui, |ui| {
+            ui.label(RichText::new(t(lang, "temp_source")).color(theme.text));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let previous = temperature_source.clone();
+                let selected = TemperatureSource::from_code(&temperature_source);
+                egui::ComboBox::from_id_salt("ui-temp-source")
+                    .selected_text(t(lang, selected.i18n_key()))
+                    .show_ui(ui, |ui| {
+                        for source in TemperatureSource::ALL {
+                            ui.selectable_value(
+                                &mut temperature_source,
+                                source.code().to_string(),
+                                t(lang, source.i18n_key()),
+                            );
+                        }
+                    });
+                if temperature_source != previous {
+                    persist_temp_source(state, temperature_source.clone());
+                }
+            });
+        });
+        ui.label(
+            RichText::new(t(lang, "temp_source_hint"))
+                .small()
+                .color(theme.muted),
+        );
+        hairline(ui, theme);
+        settings_row(ui, |ui| {
             ui.label(RichText::new(t(lang, "temp_alert")).color(theme.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if toggle_switch(ui, theme, &mut temp_alert_enabled).changed() {
@@ -1038,33 +1122,76 @@ fn draw_settings(
 
     ui.add_space(10.0);
     card(theme).show(ui, |ui| {
-        settings_row(ui, |ui| {
-            if ui.button(t(lang, "export_config")).clicked() {
+        ui.set_min_width(ui.available_width());
+        let width = settings_button_width(ui);
+        ui.horizontal(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(32.0);
+            ui.spacing_mut().item_spacing.x = 12.0;
+            if ui
+                .add_sized([width, 28.0], egui::Button::new(t(lang, "export_config")))
+                .clicked()
+            {
                 export_config(state, hwnd);
             }
-            if ui.button(t(lang, "import_config")).clicked() {
+            if ui
+                .add_sized([width, 28.0], egui::Button::new(t(lang, "import_config")))
+                .clicked()
+            {
                 import_config(state, shared, hwnd);
             }
         });
         hairline(ui, theme);
-        settings_row(ui, |ui| {
-            if ui.button(t(lang, "open_log")).clicked() {
+        ui.horizontal(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(32.0);
+            ui.spacing_mut().item_spacing.x = 12.0;
+            if ui
+                .add_sized([width, 28.0], egui::Button::new(t(lang, "open_log")))
+                .clicked()
+            {
                 let path = state.session.config.lock().unwrap().log_path.clone();
                 shell_open(&path);
             }
-            if ui.button(t(lang, "open_log_dir")).clicked() {
+            if ui
+                .add_sized([width, 28.0], egui::Button::new(t(lang, "open_log_dir")))
+                .clicked()
+            {
                 shell_open(&program_data_dir());
             }
         });
         hairline(ui, theme);
-        settings_row(ui, |ui| {
-            if ui.button(t(lang, "about")).clicked() {
+        ui.horizontal(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_min_height(32.0);
+            ui.spacing_mut().item_spacing.x = 12.0;
+            if ui
+                .add_sized([width, 28.0], egui::Button::new(t(lang, "about")))
+                .clicked()
+            {
                 nav.go(Page::About);
             }
-            if ui.button(t(lang, "diagnostics")).clicked() {
+            if ui
+                .add_sized([width, 28.0], egui::Button::new(t(lang, "diagnostics")))
+                .clicked()
+            {
                 nav.go(Page::Diagnostics);
             }
         });
+    });
+
+    ui.add_space(12.0);
+    ui.vertical_centered(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "{} {} · {}",
+                t(lang, "app_name"),
+                env!("CARGO_PKG_VERSION"),
+                AUTHOR
+            ))
+            .small()
+            .color(theme.muted),
+        );
     });
 }
 
@@ -1076,14 +1203,11 @@ fn draw_about(ui: &mut egui::Ui, lang: Language, theme: &Theme, state: &UiState,
                 .strong()
                 .color(theme.text),
         );
-        ui.label(
-            RichText::new(format!(
-                "{} {}",
-                t(lang, "version"),
-                env!("CARGO_PKG_VERSION")
-            ))
-            .color(theme.muted),
-        );
+        ui.add_space(8.0);
+        kv_line(ui, theme, t(lang, "version"), env!("CARGO_PKG_VERSION"));
+        kv_line(ui, theme, t(lang, "author"), AUTHOR);
+        link_line(ui, theme, t(lang, "forked_from"), UPSTREAM_URL);
+        link_line(ui, theme, t(lang, "repository"), REPO_URL);
         ui.add_space(8.0);
         kv_line(
             ui,
@@ -1115,8 +1239,6 @@ fn draw_about(ui: &mut egui::Ui, lang: Language, theme: &Theme, state: &UiState,
             t(lang, "secure_boot_status"),
             &state.session.runtime.secure_boot,
         );
-        ui.add_space(8.0);
-        ui.hyperlink_to(REPO_URL, REPO_URL);
         ui.add_space(8.0);
         ui.label(
             RichText::new(t(lang, "pawnio_lgpl_note"))
@@ -1174,6 +1296,26 @@ fn kv_line(ui: &mut egui::Ui, theme: &Theme, label: &str, value: &str) {
     });
 }
 
+fn link_line(ui: &mut egui::Ui, theme: &Theme, label: &str, url: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(label).color(theme.muted));
+        ui.hyperlink_to(url, url);
+    });
+}
+
+fn persist_fan_name(state: &mut UiState, index: usize, name: Option<String>) {
+    let fan_id = (index + 1) as u8;
+    let default_name = {
+        let lang = state.session.config.lock().unwrap().language();
+        t(lang, fan::title_key(fan_id)).to_string()
+    };
+    let stored = name
+        .as_deref()
+        .and_then(fan::sanitize_name)
+        .filter(|value| value != &default_name);
+    state.session.set_fan_name(fan_id, stored);
+}
+
 fn persist_settings(
     state: &mut UiState,
     close_to_tray: bool,
@@ -1205,6 +1347,21 @@ fn persist_settings(
             state.error_at = Some(Instant::now());
         }
     }
+}
+
+fn persist_temp_source(state: &mut UiState, source: String) {
+    let parsed = TemperatureSource::from_code(&source);
+    let result = {
+        let mut config = state.session.config.lock().unwrap();
+        config.temperature_source = parsed.code().to_string();
+        config.save()
+    };
+    if let Err(error) = result {
+        state.error = Some(error);
+        state.error_at = Some(Instant::now());
+        return;
+    }
+    state.session.controller.set_preferred_temperature(parsed);
 }
 
 fn persist_alert(state: &mut UiState, enabled: bool, celsius: u8) {
@@ -1270,6 +1427,11 @@ fn import_config(state: &mut UiState, shared: &Arc<Mutex<UiState>>, hwnd: isize)
         state.error_at = Some(Instant::now());
         return;
     }
+    let preferred = state.session.config.lock().unwrap().temperature_source();
+    state
+        .session
+        .controller
+        .set_preferred_temperature(preferred);
     if let Err(error) = set_start_with_windows(start_with_windows) {
         state.error = Some(error);
         state.error_at = Some(Instant::now());
@@ -1411,10 +1573,15 @@ fn commit_fan_curve(
 
 fn settings_row(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
+        ui.set_min_width(ui.available_width());
         ui.set_min_height(32.0);
         ui.spacing_mut().item_spacing.x = 12.0;
         add_contents(ui);
     });
+}
+
+fn settings_button_width(ui: &egui::Ui) -> f32 {
+    ((ui.available_width() - 12.0) / 2.0).max(32.0)
 }
 
 fn segmented(
@@ -1580,6 +1747,18 @@ fn chart_point(
     let x = inner.min.x + inner.width() * index as f32 / (len - 1) as f32;
     let y = inner.max.y - inner.height() * (value as f32 / max_value).clamp(0.0, 1.0);
     egui::pos2(x, y)
+}
+
+fn sensor_chip(ui: &mut egui::Ui, theme: &Theme, label: &str, value: Option<u8>) {
+    let Some(temp) = value else {
+        return;
+    };
+    ui.label(
+        RichText::new(format!("{label} {temp}\u{00B0}C"))
+            .small()
+            .color(temp_color(theme, temp))
+            .family(FontFamily::Monospace),
+    );
 }
 
 fn temp_color(theme: &Theme, temp: u8) -> Color32 {

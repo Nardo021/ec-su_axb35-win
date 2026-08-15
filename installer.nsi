@@ -1,8 +1,8 @@
-; EVO-X2 Control installer (single-process GUI + CLI)
+; ec-su_axb35-win installer (single-process GUI + CLI)
 
 !define PRODUCT_NAME "ec-su_axb35-win"
-!define PRODUCT_DISPLAY_NAME "EVO-X2 Control"
-!define PRODUCT_VERSION "2.2.0"
+!define PRODUCT_DISPLAY_NAME "ec-su_axb35-win"
+!define PRODUCT_VERSION "2.3.0"
 !define PRODUCT_PUBLISHER "Nardo021"
 !define PRODUCT_WEB_SITE "https://github.com/Nardo021/ec-su_axb35-win"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\evox2-control.exe"
@@ -25,7 +25,7 @@
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "$INSTDIR\evox2-control.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Run EVO-X2 Control"
+!define MUI_FINISHPAGE_RUN_TEXT "Run ${PRODUCT_NAME}"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
@@ -40,9 +40,9 @@ ShowInstDetails show
 ShowUnInstDetails show
 RequestExecutionLevel admin
 
-VIProductVersion "2.2.0.0"
+VIProductVersion "2.3.0.0"
 VIAddVersionKey "ProductName" "${PRODUCT_DISPLAY_NAME}"
-VIAddVersionKey "Comments" "Single-process GUI for EVO-X2 / SU_AXB35 EC control"
+VIAddVersionKey "Comments" "Single-process GUI for SU_AXB35 EC control"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
 VIAddVersionKey "LegalTrademarks" ""
 VIAddVersionKey "LegalCopyright" "© deseven, ${PRODUCT_PUBLISHER}"
@@ -62,7 +62,7 @@ Function .onInit
 
   ReadRegStr $1 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO" "DisplayVersion"
   ${If} $1 == ""
-    MessageBox MB_ICONEXCLAMATION "PawnIO was not detected.$\r$\n$\r$\nInstall the official signed PawnIO release from https://pawnio.eu/ before using EVO-X2 Control.$\r$\n$\r$\nSecure Boot can remain enabled. This installer does not bundle a kernel driver."
+    MessageBox MB_ICONEXCLAMATION "PawnIO was not detected.$\r$\n$\r$\nInstall the official signed PawnIO release from https://pawnio.eu/ before using ${PRODUCT_NAME}.$\r$\n$\r$\nSecure Boot can remain enabled. This installer does not bundle a kernel driver."
   ${EndIf}
 FunctionEnd
 
@@ -78,7 +78,7 @@ Function RemoveLegacyService
 FunctionEnd
 
 Function KillExistingApp
-  DetailPrint "Stopping running EVO-X2 Control processes..."
+  DetailPrint "Stopping running ${PRODUCT_NAME} processes..."
   nsExec::ExecToLog 'taskkill /F /IM evox2-control.exe'
   nsExec::ExecToLog 'taskkill /F /IM evox2ctl.exe'
   nsExec::ExecToLog 'taskkill /F /IM ec-su_axb35-win-client.exe'
@@ -92,7 +92,7 @@ Section "MainSection" SEC01
 
   SetOutPath "$INSTDIR"
   SetOverwrite ifnewer
-  DetailPrint "Installing EVO-X2 Control (single-process GUI)..."
+  DetailPrint "Installing ${PRODUCT_NAME} (single-process GUI)..."
   File "target\release\evox2-control.exe"
   File "/oname=evox2ctl.exe" "target\release\evox2-control.exe"
   File "LICENSE"
@@ -108,7 +108,7 @@ Section -AdditionalIcons
   SetOutPath $INSTDIR
   WriteIniStr "$INSTDIR\${PRODUCT_NAME}.url" "InternetShortcut" "URL" "${PRODUCT_WEB_SITE}"
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\EVO-X2 Control.lnk" "$INSTDIR\evox2-control.exe"
+  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\evox2-control.exe"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Quiet.lnk" "$INSTDIR\evox2ctl.exe" "mode quiet"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Balanced.lnk" "$INSTDIR\evox2ctl.exe" "mode balanced"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\Performance.lnk" "$INSTDIR\evox2ctl.exe" "mode performance"
@@ -170,6 +170,7 @@ Section Uninstall
   RMDir "$APPDATA\ec-su_axb35-win\scripts"
   RMDir "$APPDATA\ec-su_axb35-win"
 
+  Delete "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\EVO-X2 Control.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\EC SU_AXB35 Client.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\Quiet.lnk"

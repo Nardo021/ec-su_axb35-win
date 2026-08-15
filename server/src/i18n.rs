@@ -1,3 +1,5 @@
+pub const APP_NAME: &str = "ec-su_axb35-win";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Language {
     Zh,
@@ -7,8 +9,8 @@ pub enum Language {
 impl Language {
     pub fn from_code(code: &str) -> Self {
         match code {
-            "en" => Language::En,
-            _ => Language::Zh,
+            "zh" => Language::Zh,
+            _ => Language::En,
         }
     }
 
@@ -22,8 +24,8 @@ impl Language {
 
 pub fn t(language: Language, key: &str) -> &str {
     match (language, key) {
-        (Language::Zh, "app_title") => "EVO-X2 控制",
-        (Language::En, "app_title") => "EVO-X2 Control",
+        (Language::Zh, "app_title") => APP_NAME,
+        (Language::En, "app_title") => APP_NAME,
         (Language::Zh, "ec_firmware") => "EC 固件版本：",
         (Language::En, "ec_firmware") => "EC firmware version:",
         (Language::Zh, "secure_boot") => "安全启动：",
@@ -36,6 +38,8 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "current_mode") => "Current mode:",
         (Language::Zh, "power_mode") => "电源模式",
         (Language::En, "power_mode") => "Power Mode",
+        (Language::Zh, "processor") => "处理器",
+        (Language::En, "processor") => "Processor",
         (Language::Zh, "quiet") => "安静",
         (Language::En, "quiet") => "Quiet",
         (Language::Zh, "balanced") => "均衡",
@@ -50,8 +54,8 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "fan3") => "Fan3",
         (Language::Zh, "fan_cpu") => "CPU 风扇",
         (Language::En, "fan_cpu") => "CPU Fan",
-        (Language::Zh, "fan_secondary") => "第二 CPU/APU 风扇",
-        (Language::En, "fan_secondary") => "Secondary CPU/APU Fan",
+        (Language::Zh, "fan_secondary") => "第二 CPU 风扇",
+        (Language::En, "fan_secondary") => "Secondary CPU Fan",
         (Language::Zh, "fan_system") => "系统风扇",
         (Language::En, "fan_system") => "System Fan",
         (Language::Zh, "mode") => "模式：",
@@ -86,6 +90,10 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "lang_en") => "English",
         (Language::Zh, "edit") => "编辑",
         (Language::En, "edit") => "Edit",
+        (Language::Zh, "rename") => "重命名",
+        (Language::En, "rename") => "Rename",
+        (Language::Zh, "restore_default") => "恢复默认",
+        (Language::En, "restore_default") => "Restore default",
         (Language::Zh, "apply") => "应用",
         (Language::En, "apply") => "Apply",
         (Language::Zh, "show_window") => "显示窗口",
@@ -106,8 +114,8 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "pawnio_missing") => {
             "PawnIO is required for hardware access.\n\nSecure Boot can remain enabled.\n\nInstall the official PawnIO release and restart this application.\n\nOK will open https://pawnio.eu/"
         }
-        (Language::Zh, "already_running") => "EVO-X2 控制已在运行。",
-        (Language::En, "already_running") => "EVO-X2 Control is already running.",
+        (Language::Zh, "already_running") => "ec-su_axb35-win 已在运行。",
+        (Language::En, "already_running") => "ec-su_axb35-win is already running.",
         (Language::Zh, "auto") => "自动",
         (Language::En, "auto") => "auto",
         (Language::Zh, "fixed") => "固定",
@@ -132,20 +140,40 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "model") => "Model:",
         (Language::Zh, "power_mode_status") => "电源模式：",
         (Language::En, "power_mode_status") => "Power Mode:",
-        (Language::Zh, "apu_temp") => "APU 温度：",
-        (Language::En, "apu_temp") => "APU Temp:",
+        (Language::Zh, "apu_temp") => "处理器温度：",
+        (Language::En, "apu_temp") => "Processor temp:",
         (Language::Zh, "ec_raw_temp") => "EC 0x70 原始温度：",
         (Language::En, "ec_raw_temp") => "EC 0x70 raw temp:",
-        (Language::Zh, "temp_src_gpu") => "GPU 驱动（任务管理器）",
-        (Language::En, "temp_src_gpu") => "GPU driver (Task Manager)",
-        (Language::Zh, "temp_src_adl") => "AMD ADL",
-        (Language::En, "temp_src_adl") => "AMD ADL",
-        (Language::Zh, "temp_src_ec") => "EC 0x70",
-        (Language::En, "temp_src_ec") => "EC 0x70",
+        (Language::Zh, "temp_src_gpu") => "GPU（任务管理器 / ADL）",
+        (Language::En, "temp_src_gpu") => "GPU (Task Manager / ADL)",
+        (Language::Zh, "temp_src_cpu") => "CPU（AMD ADL）",
+        (Language::En, "temp_src_cpu") => "CPU (AMD ADL)",
+        (Language::Zh, "temp_src_soc") => "SoC（AMD ADL）",
+        (Language::En, "temp_src_soc") => "SoC (AMD ADL)",
+        (Language::Zh, "temp_src_hotspot") => "GPU 热点（AMD ADL）",
+        (Language::En, "temp_src_hotspot") => "GPU hotspot (AMD ADL)",
+        (Language::Zh, "temp_src_ec") => "EC 0x70（不准）",
+        (Language::En, "temp_src_ec") => "EC 0x70 (inaccurate)",
+        (Language::Zh, "temp_source") => "温度基准",
+        (Language::En, "temp_source") => "Temperature source",
+        (Language::Zh, "temp_source_hint") => {
+            "主页大数字、风扇曲线和温度告警使用此传感器。读不到时回退到 GPU。"
+        }
+        (Language::En, "temp_source_hint") => {
+            "Used for the processor reading, fan curves, and alerts. Falls back to GPU if unavailable."
+        }
+        (Language::Zh, "temp_gpu") => "GPU 温度：",
+        (Language::En, "temp_gpu") => "GPU temp:",
+        (Language::Zh, "temp_cpu") => "CPU 温度：",
+        (Language::En, "temp_cpu") => "CPU temp:",
+        (Language::Zh, "temp_soc") => "SoC 温度：",
+        (Language::En, "temp_soc") => "SoC temp:",
+        (Language::Zh, "temp_hotspot") => "GPU 热点：",
+        (Language::En, "temp_hotspot") => "GPU hotspot:",
         (Language::Zh, "cpu_fan") => "CPU 风扇：",
         (Language::En, "cpu_fan") => "CPU Fan:",
-        (Language::Zh, "secondary_fan") => "第二 CPU/APU 风扇：",
-        (Language::En, "secondary_fan") => "Secondary CPU/APU Fan:",
+        (Language::Zh, "secondary_fan") => "第二 CPU 风扇：",
+        (Language::En, "secondary_fan") => "Secondary CPU Fan:",
         (Language::Zh, "system_fan") => "系统风扇：",
         (Language::En, "system_fan") => "System Fan:",
         (Language::Zh, "pawnio") => "PawnIO：",
@@ -198,6 +226,10 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "diagnostics") => "Diagnostics",
         (Language::Zh, "version") => "版本：",
         (Language::En, "version") => "Version:",
+        (Language::Zh, "author") => "作者：",
+        (Language::En, "author") => "Author:",
+        (Language::Zh, "forked_from") => "派生自：",
+        (Language::En, "forked_from") => "Forked from:",
         (Language::Zh, "repository") => "仓库：",
         (Language::En, "repository") => "Repository:",
         (Language::Zh, "copy_diagnostics") => "复制到剪贴板",
@@ -216,14 +248,14 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "temp_alert") => "Temperature alert",
         (Language::Zh, "temp_alert_threshold") => "告警阈值（°C）",
         (Language::En, "temp_alert_threshold") => "Alert threshold (°C)",
-        (Language::Zh, "temp_alert_body") => "APU 温度达到 ",
-        (Language::En, "temp_alert_body") => "APU temperature reached ",
+        (Language::Zh, "temp_alert_body") => "处理器温度达到 ",
+        (Language::En, "temp_alert_body") => "Processor temperature reached ",
         (Language::Zh, "pawnio_lgpl_note") => "内置 LpcACPIEC 模块来自 PawnIO.Modules，许可证为 LGPL-2.1-or-later。PawnIO 驱动需单独从 pawnio.eu 安装。",
         (Language::En, "pawnio_lgpl_note") => "The bundled LpcACPIEC module is from PawnIO.Modules under LGPL-2.1-or-later. Install the PawnIO driver separately from pawnio.eu.",
         (Language::Zh, "copied") => "已复制",
         (Language::En, "copied") => "Copied",
-        (Language::Zh, "app_name") => "EVO-X2 Control",
-        (Language::En, "app_name") => "EVO-X2 Control",
+        (Language::Zh, "app_name") => APP_NAME,
+        (Language::En, "app_name") => APP_NAME,
         (_, key) => key,
     }
 }
@@ -233,13 +265,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_to_chinese() {
+    fn defaults_to_english() {
         assert_eq!(Language::from_code("zh"), Language::Zh);
-        assert_eq!(Language::from_code("de"), Language::Zh);
+        assert_eq!(Language::from_code("de"), Language::En);
         assert_eq!(Language::from_code("en"), Language::En);
         assert_eq!(t(Language::Zh, "apply"), "应用");
         assert_eq!(t(Language::En, "edit"), "Edit");
         assert_eq!(t(Language::Zh, "back"), "返回");
         assert_eq!(t(Language::En, "settings"), "Settings");
+        assert_eq!(t(Language::En, "processor"), "Processor");
+        assert_eq!(t(Language::Zh, "processor"), "处理器");
+        assert_eq!(t(Language::Zh, "restore_default"), "恢复默认");
+        assert_eq!(t(Language::En, "rename"), "Rename");
     }
 }

@@ -7,6 +7,8 @@ use crate::platform::{is_admin, pawnio_install_version, secure_boot_status};
 use crate::session::AppSession;
 
 pub const REPO_URL: &str = "https://github.com/Nardo021/ec-su_axb35-win";
+pub const UPSTREAM_URL: &str = "https://github.com/deseven/ec-su_axb35-win";
+pub const AUTHOR: &str = "Nardo021";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DiagnoseReport {
@@ -24,6 +26,10 @@ pub struct DiagnoseReport {
     pub secure_boot: String,
     pub temperature: Option<u8>,
     pub temperature_source: Option<String>,
+    pub gpu_temp: Option<u8>,
+    pub cpu_temp: Option<u8>,
+    pub soc_temp: Option<u8>,
+    pub hotspot_temp: Option<u8>,
     pub ec_raw_temp: Option<u8>,
 }
 
@@ -61,16 +67,27 @@ impl DiagnoseReport {
                 .unwrap_or_else(secure_boot_status),
             temperature: None,
             temperature_source: None,
+            gpu_temp: None,
+            cpu_temp: None,
+            soc_temp: None,
+            hotspot_temp: None,
             ec_raw_temp: None,
         };
         if let Some(session) = session {
             report.firmware = session.firmware_version().ok();
             report.power_mode = session.power_mode().ok();
             if let Ok(ec_temp) = session.controller.read_ec_apu_temperature() {
-                let (temp, source) = crate::thermal::resolve_with_source(ec_temp);
-                report.temperature = Some(temp);
-                report.temperature_source = Some(source.i18n_key().to_string());
-                report.ec_raw_temp = Some(ec_temp);
+                let snap = crate::thermal::read_thermal(
+                    ec_temp,
+                    session.controller.preferred_temperature(),
+                );
+                report.temperature = Some(snap.control);
+                report.temperature_source = Some(snap.control_source.i18n_key().to_string());
+                report.gpu_temp = snap.gpu;
+                report.cpu_temp = snap.cpu;
+                report.soc_temp = snap.soc;
+                report.hotspot_temp = snap.hotspot;
+                report.ec_raw_temp = Some(snap.ec_raw);
             }
         }
         report
@@ -78,7 +95,7 @@ impl DiagnoseReport {
 
     pub fn format_text(&self, language: Language) -> String {
         let mut lines = Vec::new();
-        lines.push(format!("EVO-X2 Control {}", self.app_version));
+        lines.push(format!("{} {}", crate::i18n::APP_NAME, self.app_version));
         lines.push(format!("{} {}", t(language, "os"), self.os));
         lines.push(format!(
             "{} {}",
@@ -140,6 +157,10 @@ impl DiagnoseReport {
                 t(language, source)
             ));
         }
+        push_opt_temp(&mut lines, language, "temp_gpu", self.gpu_temp);
+        push_opt_temp(&mut lines, language, "temp_cpu", self.cpu_temp);
+        push_opt_temp(&mut lines, language, "temp_soc", self.soc_temp);
+        push_opt_temp(&mut lines, language, "temp_hotspot", self.hotspot_temp);
         if let Some(ec_temp) = self.ec_raw_temp {
             lines.push(format!("{} {} C", t(language, "ec_raw_temp"), ec_temp));
         }
@@ -148,5 +169,11 @@ impl DiagnoseReport {
         }
         lines.push(format!("{} {REPO_URL}", t(language, "repository")));
         lines.join("\n")
+    }
+}
+
+fn push_opt_temp(lines: &mut Vec<String>, language: Language, key: &str, value: Option<u8>) {
+    if let Some(temp) = value {
+        lines.push(format!("{} {} C", t(language, key), temp));
     }
 }

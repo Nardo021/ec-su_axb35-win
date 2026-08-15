@@ -17,8 +17,10 @@ use winapi::um::libloaderapi::GetModuleFileNameW;
 use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
 use winapi::um::securitybaseapi::GetTokenInformation;
 use winapi::um::shellapi::ShellExecuteW;
+use winapi::um::stringapiset::MultiByteToWideChar;
 use winapi::um::synchapi::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use winapi::um::winbase::WAIT_OBJECT_0;
+use winapi::um::winnls::GetACP;
 use winapi::um::winnt::{
     HANDLE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, REG_SZ, TOKEN_ELEVATION,
     TOKEN_QUERY,
@@ -245,12 +247,13 @@ pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
         Ok(())
     } else {
         let output = run_schtasks(&schtasks_delete_args())?;
-        if !output.success && !schtasks_missing_task(&output.message) {
-            return Err(format!("Failed to remove logon task ({})", output.message));
-        }
         remove_legacy_run_entries()?;
-        if scheduled_task_registered() {
-            return Err("Logon task is still registered".to_string());
+        let still_registered = scheduled_task_registered();
+        if should_report_logon_remove_failure(output.success, still_registered) {
+            if output.success {
+                return Err("Logon task is still registered".to_string());
+            }
+            return Err(format!("Failed to remove logon task ({})", output.message));
         }
         Ok(())
     }
@@ -292,6 +295,47 @@ pub(crate) fn schtasks_query_args() -> Vec<String> {
     vec!["/Query".into(), "/TN".into(), STARTUP_TASK_NAME.into()]
 }
 
+pub(crate) fn should_report_logon_remove_failure(_delete_ok: bool, still_registered: bool) -> bool {
+    still_registered
+}
+
+pub(crate) fn decode_code_page(code_page: u32, bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    unsafe {
+        let needed = MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr() as *const i8,
+            bytes.len() as i32,
+            ptr::null_mut(),
+            0,
+        );
+        if needed <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; needed as usize];
+        let written = MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr() as *const i8,
+            bytes.len() as i32,
+            wide.as_mut_ptr(),
+            needed,
+        );
+        if written <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        String::from_utf16_lossy(&wide[..written as usize])
+    }
+}
+
+fn decode_console_bytes(bytes: &[u8]) -> String {
+    decode_code_page(unsafe { GetACP() }, bytes)
+}
+
+#[cfg(test)]
 pub(crate) fn schtasks_missing_task(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("cannot find")
@@ -417,8 +461,8 @@ fn run_schtasks(args: &[String]) -> Result<SchtasksOutput, String> {
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|error| format!("Failed to run {exe}: {error}"))?;
-    let mut message = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut message = decode_console_bytes(&output.stdout);
+    let stderr = decode_console_bytes(&output.stderr);
     if !stderr.trim().is_empty() {
         if !message.trim().is_empty() {
             message.push('\n');
@@ -583,6 +627,11 @@ fn read_hkcu_dword(subkey: &str, value_name: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
+    const GBK_FILE_NOT_FOUND: &[u8] = &[
+        0xB4, 0xED, 0xCE, 0xF3, 0x3A, 0x20, 0xCF, 0xB5, 0xCD, 0xB3, 0xD5, 0xD2, 0xB2, 0xBB, 0xB5,
+        0xBD, 0xD6, 0xB8, 0xB6, 0xA8, 0xB5, 0xC4, 0xCE, 0xC4, 0xBC, 0xFE, 0xA1, 0xA3,
+    ];
+
     #[test]
     fn run_value_matches_quoted_and_unquoted_paths() {
         let exe = r"C:\Program Files\ec-su_axb35-win\evox2-control.exe";
@@ -628,6 +677,33 @@ mod tests {
         assert!(schtasks_missing_task("系统找不到指定的文件。"));
         assert!(schtasks_missing_task("指定的任务名不存在"));
         assert!(!schtasks_missing_task("Access is denied."));
+    }
+
+    #[test]
+    fn gbk_missing_task_is_not_recognized_as_utf8() {
+        let lossy = String::from_utf8_lossy(GBK_FILE_NOT_FOUND);
+        assert!(
+            !schtasks_missing_task(&lossy),
+            "UTF-8 lossy of GBK schtasks text must not look like a missing-task message: {lossy:?}"
+        );
+    }
+
+    #[test]
+    fn gbk_code_page_recovers_missing_task_message() {
+        let message = decode_code_page(936, GBK_FILE_NOT_FOUND);
+        assert!(
+            message.contains("找不到"),
+            "ACP/GBK decode should recover Chinese schtasks text, got {message:?}"
+        );
+        assert!(schtasks_missing_task(&message));
+    }
+
+    #[test]
+    fn absent_logon_task_is_not_a_remove_failure() {
+        assert!(!should_report_logon_remove_failure(false, false));
+        assert!(should_report_logon_remove_failure(false, true));
+        assert!(!should_report_logon_remove_failure(true, false));
+        assert!(should_report_logon_remove_failure(true, true));
     }
 
     #[test]

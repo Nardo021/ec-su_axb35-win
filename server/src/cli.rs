@@ -20,7 +20,7 @@ pub const EXIT_FIRMWARE: i32 = 6;
 
 #[derive(Parser, Debug)]
 #[command(name = "evox2ctl")]
-#[command(about = "EVO-X2 / SU_AXB35 control")]
+#[command(about = "SU_AXB35 EC control")]
 pub struct Args {
     #[arg(long, global = true)]
     pub json: bool,
@@ -121,7 +121,7 @@ pub fn exit_code_from_error(error: &str) -> i32 {
 fn current_language() -> Language {
     ServerConfig::load()
         .map(|config| config.language())
-        .unwrap_or(Language::Zh)
+        .unwrap_or(Language::En)
 }
 
 fn cmd_mode(
@@ -190,6 +190,10 @@ fn cmd_status(language: Language, json: bool) -> Result<(), CliError> {
             power_mode: metrics.power_mode.clone(),
             temperature: metrics.temperature,
             temperature_source: metrics.temperature_source.i18n_key().to_string(),
+            gpu_temp: metrics.gpu_temp,
+            cpu_temp: metrics.cpu_temp,
+            soc_temp: metrics.soc_temp,
+            hotspot_temp: metrics.hotspot_temp,
             fans: [
                 fan_out(1, &metrics.fans[0]),
                 fan_out(2, &metrics.fans[1]),
@@ -211,6 +215,10 @@ fn cmd_status(language: Language, json: bool) -> Result<(), CliError> {
         metrics.temperature,
         t(language, metrics.temperature_source.i18n_key())
     );
+    print_opt_temp(language, "temp_gpu", metrics.gpu_temp);
+    print_opt_temp(language, "temp_cpu", metrics.cpu_temp);
+    print_opt_temp(language, "temp_soc", metrics.soc_temp);
+    print_opt_temp(language, "temp_hotspot", metrics.hotspot_temp);
     println!("{} {} RPM", t(language, "cpu_fan"), metrics.fans[0].rpm);
     println!(
         "{} {} RPM",
@@ -424,6 +432,10 @@ struct StatusOut {
     power_mode: String,
     temperature: u8,
     temperature_source: String,
+    gpu_temp: Option<u8>,
+    cpu_temp: Option<u8>,
+    soc_temp: Option<u8>,
+    hotspot_temp: Option<u8>,
     fans: [FanOut; 3],
     pawnio: String,
     secure_boot: String,
@@ -457,6 +469,12 @@ fn open_session() -> Result<AppSession, CliError> {
         monitor_curves: false,
     })
     .map_err(CliError::from)
+}
+
+fn print_opt_temp(language: Language, key: &str, value: Option<u8>) {
+    if let Some(temp) = value {
+        println!("{} {} C", t(language, key), temp);
+    }
 }
 
 fn title_case(value: &str) -> String {

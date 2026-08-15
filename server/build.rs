@@ -25,8 +25,8 @@ fn main() {
         let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
         let mut res = winres::WindowsResource::new();
         res.set_icon("assets/ec-su_axb35-win.ico");
-        res.set("ProductName", "EVO-X2 Control");
-        res.set("FileDescription", "EVO-X2 / SU_AXB35 EC control");
+        res.set("ProductName", "ec-su_axb35-win");
+        res.set("FileDescription", "SU_AXB35 EC control");
         res.set("CompanyName", "Nardo021");
         res.set("LegalCopyright", "Copyright (c) deseven, Nardo021");
         res.set("FileVersion", &version);

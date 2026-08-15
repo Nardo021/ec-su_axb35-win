@@ -1,9 +1,32 @@
 # Changelog
 
-All notable changes to EVO-X2 Control are documented here.
+All notable changes to ec-su_axb35-win are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [2.3.0] - 2026-08-16
+
+Selectable temperature source, custom fan names, and the original
+`ec-su_axb35-win` product title. Still no network API and no Windows service.
+
+### Added
+
+- Settings temperature source: GPU (default), CPU, SoC, GPU hotspot, or EC
+  `0x70`. Fan curves and alerts follow that choice, with GPU then EC fallback.
+- Rename fans from each card, with restore-default names.
+- Settings footer shows version and author. About still has the full details.
+
+### Changed
+
+- Window title and product name are `ec-su_axb35-win`.
+- The processor card replaces the APU label.
+- Default language is English when `language` is missing.
+
+### Fixed
+
+- Turning off Start with Windows failed when the logon task was already
+  missing (Chinese `schtasks` text was decoded as UTF-8).
 
 ## [2.2.0] - 2026-08-15
 
@@ -64,6 +87,7 @@ changed enough to warrant a minor bump rather than 2.0.1.
 First PawnIO release: one window plus tray, no Windows service, Secure Boot
 can stay enabled. See the GitHub Release for that tag.
 
+[2.3.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/Nardo021/ec-su_axb35-win/releases/tag/v2.0.0

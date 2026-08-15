@@ -172,7 +172,7 @@ fn message_loop(session: Arc<AppSession>, events: Sender<TrayEvent>) {
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
             class.as_ptr(),
-            wide("EVO-X2 Control").as_ptr(),
+            wide(crate::i18n::APP_NAME).as_ptr(),
             WS_POPUP,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -432,7 +432,7 @@ fn current_language() -> Language {
                 .as_ref()
                 .map(|inner| inner.session.config.lock().unwrap().language())
         })
-        .unwrap_or(Language::Zh)
+        .unwrap_or(Language::En)
 }
 
 fn add_icon() {
@@ -477,7 +477,7 @@ fn delete_icon() {
 fn notify_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
     unsafe {
         let mut tip = [0u16; 128];
-        copy_wide(&mut tip, "EVO-X2 Control");
+        copy_wide(&mut tip, crate::i18n::APP_NAME);
         let mut nid: NOTIFYICONDATAW = mem::zeroed();
         nid.cbSize = mem::size_of::<NOTIFYICONDATAW>() as UINT;
         nid.hWnd = hwnd;

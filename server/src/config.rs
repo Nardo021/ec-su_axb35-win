@@ -3,7 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use crate::alert::{clamp_threshold, TEMP_ALERT_DEFAULT};
+use crate::fan::{self, sanitize_name};
 use crate::i18n::Language;
+use crate::thermal::TemperatureSource;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FanConfig {
@@ -11,6 +13,8 @@ pub struct FanConfig {
     pub level: u8,
     pub rampup_curve: [u8; 5],
     pub rampdown_curve: [u8; 5],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Default for FanConfig {
@@ -20,6 +24,7 @@ impl Default for FanConfig {
             level: 0,
             rampup_curve: [60, 70, 83, 95, 97],
             rampdown_curve: [40, 50, 80, 94, 96],
+            name: None,
         }
     }
 }
@@ -29,7 +34,7 @@ fn default_close_to_tray() -> bool {
 }
 
 fn default_language() -> String {
-    "zh".to_string()
+    "en".to_string()
 }
 
 fn default_temp_alert_enabled() -> bool {
@@ -38,6 +43,10 @@ fn default_temp_alert_enabled() -> bool {
 
 fn default_temp_alert_celsius() -> u8 {
     TEMP_ALERT_DEFAULT
+}
+
+fn default_temperature_source() -> String {
+    TemperatureSource::Gpu.code().to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -59,6 +68,8 @@ pub struct ServerConfig {
     pub temp_alert_enabled: bool,
     #[serde(default = "default_temp_alert_celsius")]
     pub temp_alert_celsius: u8,
+    #[serde(default = "default_temperature_source")]
+    pub temperature_source: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -72,6 +83,8 @@ pub struct PortableConfig {
     pub language: String,
     pub temp_alert_enabled: bool,
     pub temp_alert_celsius: u8,
+    #[serde(default = "default_temperature_source")]
+    pub temperature_source: String,
 }
 
 impl Default for ServerConfig {
@@ -95,6 +108,7 @@ impl Default for ServerConfig {
             language: default_language(),
             temp_alert_enabled: default_temp_alert_enabled(),
             temp_alert_celsius: default_temp_alert_celsius(),
+            temperature_source: default_temperature_source(),
         }
     }
 }
@@ -111,6 +125,20 @@ pub fn config_file_path() -> String {
 impl ServerConfig {
     pub fn language(&self) -> Language {
         Language::from_code(&self.language)
+    }
+
+    pub fn temperature_source(&self) -> TemperatureSource {
+        TemperatureSource::from_code(&self.temperature_source)
+    }
+
+    pub fn fan_custom_name(&self, fan_id: u8) -> Option<String> {
+        let fan = match fan_id {
+            1 => self.fan1.as_ref(),
+            2 => self.fan2.as_ref(),
+            3 => self.fan3.as_ref(),
+            _ => None,
+        }?;
+        fan.name.as_deref().and_then(sanitize_name)
     }
 
     pub fn load() -> Result<Self, String> {
@@ -140,6 +168,8 @@ impl ServerConfig {
             config.log_path = format!("{}\\{}", program_data_dir(), config.log_path);
         }
         config.temp_alert_celsius = clamp_threshold(config.temp_alert_celsius);
+        config.temperature_source = config.temperature_source().code().to_string();
+        sanitize_fan_names(&mut config);
 
         Ok(config)
     }
@@ -170,6 +200,7 @@ impl ServerConfig {
             language: self.language.clone(),
             temp_alert_enabled: self.temp_alert_enabled,
             temp_alert_celsius: clamp_threshold(self.temp_alert_celsius),
+            temperature_source: self.temperature_source().code().to_string(),
         }
     }
 
@@ -178,11 +209,23 @@ impl ServerConfig {
         self.fan1 = Some(portable.fan1);
         self.fan2 = Some(portable.fan2);
         self.fan3 = Some(portable.fan3);
+        if let Some(fan) = self.fan1.as_mut() {
+            sanitize_fan_config(fan);
+        }
+        if let Some(fan) = self.fan2.as_mut() {
+            sanitize_fan_config(fan);
+        }
+        if let Some(fan) = self.fan3.as_mut() {
+            sanitize_fan_config(fan);
+        }
         self.close_to_tray = portable.close_to_tray;
         self.start_with_windows = portable.start_with_windows;
         self.language = portable.language;
         self.temp_alert_enabled = portable.temp_alert_enabled;
         self.temp_alert_celsius = clamp_threshold(portable.temp_alert_celsius);
+        self.temperature_source = TemperatureSource::from_code(&portable.temperature_source)
+            .code()
+            .to_string();
     }
 }
 
@@ -212,6 +255,13 @@ impl PortableConfig {
                 self.temp_alert_celsius
             ));
         }
+        if TemperatureSource::from_code(&self.temperature_source).code() != self.temperature_source
+        {
+            return Err(format!(
+                "Invalid temperature source: {}",
+                self.temperature_source
+            ));
+        }
         Ok(())
     }
 }
@@ -223,7 +273,28 @@ fn validate_fan(name: &str, fan: &FanConfig) -> Result<(), String> {
     if fan.level > 5 {
         return Err(format!("Invalid {name} level: {}", fan.level));
     }
+    if let Some(label) = &fan.name {
+        if label.chars().count() > fan::NAME_MAX_CHARS * 2 {
+            return Err(format!("Invalid {name} name: too long"));
+        }
+    }
     Ok(())
+}
+
+fn sanitize_fan_config(fan: &mut FanConfig) {
+    fan.name = fan.name.as_deref().and_then(sanitize_name);
+}
+
+fn sanitize_fan_names(config: &mut ServerConfig) {
+    if let Some(fan) = config.fan1.as_mut() {
+        sanitize_fan_config(fan);
+    }
+    if let Some(fan) = config.fan2.as_mut() {
+        sanitize_fan_config(fan);
+    }
+    if let Some(fan) = config.fan3.as_mut() {
+        sanitize_fan_config(fan);
+    }
 }
 
 #[cfg(test)]
@@ -242,10 +313,12 @@ mod tests {
         .unwrap();
         assert!(parsed.close_to_tray);
         assert!(!parsed.start_with_windows);
-        assert_eq!(parsed.language, "zh");
-        assert_eq!(parsed.language(), Language::Zh);
+        assert_eq!(parsed.language, "en");
+        assert_eq!(parsed.language(), Language::En);
         assert!(parsed.temp_alert_enabled);
         assert_eq!(parsed.temp_alert_celsius, 90);
+        assert_eq!(parsed.temperature_source, "gpu");
+        assert_eq!(parsed.temperature_source(), TemperatureSource::Gpu);
     }
 
     #[test]
@@ -273,6 +346,7 @@ mod tests {
         assert!(!json.contains("port"));
         assert!(!json.contains("log_path"));
         assert!(json.contains("temp_alert_enabled"));
+        assert!(json.contains("\"temperature_source\":\"gpu\""));
     }
 
     #[test]
@@ -304,10 +378,39 @@ mod tests {
     }
 
     #[test]
+    fn portable_import_rejects_bad_temperature_source() {
+        let mut portable = ServerConfig::default().to_portable();
+        portable.temperature_source = "hottest".into();
+        assert!(portable.validate().is_err());
+    }
+
+    #[test]
     fn portable_import_accepts_valid_file() {
         let json = serde_json::to_string_pretty(&ServerConfig::default().to_portable()).unwrap();
         let parsed = PortableConfig::parse_json(&json).unwrap();
-        assert_eq!(parsed.language, "zh");
+        assert_eq!(parsed.language, "en");
         assert_eq!(parsed.fan1.mode, "auto");
+        assert_eq!(parsed.fan1.name, None);
+    }
+
+    #[test]
+    fn old_fan_config_without_name_parses() {
+        let parsed: FanConfig = serde_json::from_str(
+            r#"{"mode":"auto","level":0,"rampup_curve":[1,2,3,4,5],"rampdown_curve":[1,2,3,4,5]}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.name, None);
+    }
+
+    #[test]
+    fn fan_custom_name_roundtrips() {
+        let mut config = ServerConfig::default();
+        config.fan1.as_mut().unwrap().name = Some("  Exhaust  ".into());
+        sanitize_fan_names(&mut config);
+        assert_eq!(config.fan_custom_name(1).as_deref(), Some("Exhaust"));
+        let json = serde_json::to_string(&config.to_portable()).unwrap();
+        assert!(json.contains("Exhaust"));
+        let parsed = PortableConfig::parse_json(&json).unwrap();
+        assert_eq!(parsed.fan1.name.as_deref(), Some("Exhaust"));
     }
 }

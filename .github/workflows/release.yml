@@ -105,6 +105,6 @@ jobs:
             gh release upload $tag @assets --clobber
           } else {
             gh release create $tag @assets `
-              --title "EVO-X2 Control $tag" `
+              --title "ec-su_axb35-win $tag" `
               --generate-notes
           }

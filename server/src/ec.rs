@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use crate::ec_io::{is_acpi_ec_port, EcIoBackend, EC_COMMAND_PORT, EC_DATA_PORT};
 use crate::hardware::HardwareIdentity;
 use crate::platform::AccessEcGuard;
+use crate::thermal::TemperatureSource;
 
 const EC_COMMAND_READ: u8 = 0x80;
 const EC_COMMAND_WRITE: u8 = 0x81;
@@ -150,6 +151,7 @@ pub struct EcController<B: EcIoBackend> {
     backend: B,
     transaction: Mutex<()>,
     fan_curves: Mutex<[FanCurveData; 3]>,
+    preferred_temperature: Mutex<TemperatureSource>,
     writes_allowed: bool,
     hardware: HardwareIdentity,
 }
@@ -164,6 +166,7 @@ impl<B: EcIoBackend> EcController<B> {
             backend,
             transaction: Mutex::new(()),
             fan_curves: Mutex::new(curves),
+            preferred_temperature: Mutex::new(TemperatureSource::Gpu),
             writes_allowed: true,
             hardware: HardwareIdentity::default(),
         }
@@ -470,7 +473,18 @@ impl<B: EcIoBackend> EcController<B> {
 
     fn read_control_temperature(&self) -> Result<u8, String> {
         let ec = self.read_ec_apu_temperature()?;
-        Ok(crate::thermal::resolve_temperature(ec))
+        Ok(crate::thermal::resolve_temperature(
+            ec,
+            self.preferred_temperature(),
+        ))
+    }
+
+    pub fn set_preferred_temperature(&self, source: TemperatureSource) {
+        *self.preferred_temperature.lock().unwrap() = source;
+    }
+
+    pub fn preferred_temperature(&self) -> TemperatureSource {
+        *self.preferred_temperature.lock().unwrap()
     }
 
     pub fn has_curve_fans(&self) -> bool {

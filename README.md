@@ -1,4 +1,4 @@
-# EVO-X2 Control for Windows
+# ec-su_axb35-win
 
 This fork replaces WinRing0 with PawnIO.
 
@@ -29,7 +29,7 @@ secure configuration.
 
 1. Install the official PawnIO release from https://pawnio.eu/.
 2. Download the latest [GitHub Release](https://github.com/Nardo021/ec-su_axb35-win/releases),
-   run `ec-su_axb35-win-installer-2.2.0.exe` as Administrator, or copy the
+   run `ec-su_axb35-win-installer-2.3.0.exe` as Administrator, or copy the
    binaries from `dist/`. Windows may show a SmartScreen warning until the
    binaries are Authenticode-signed; this project does not ship a self-signed
    certificate. The GUI and `evox2ctl` both request Administrator rights
@@ -76,7 +76,7 @@ in-process. It does not need a separate server process.
 A second double-click focuses the existing window instead of opening another
 EC session.
 
-The APU block shows temperature, the current power mode, and a selector:
+The processor block shows temperature, the current power mode, and a selector:
 
 ```text
 Temperature: 48°C  GPU driver (Task Manager)
@@ -86,23 +86,26 @@ Power Mode
 [ Quiet ] [ Balanced ] [ Performance ]
 ```
 
-Fan blocks are labeled CPU, secondary CPU/APU, and system. They still
+Fan blocks are labeled CPU, secondary CPU, and system. They still
 support auto / fixed / curve, RPM, and temperature charts. Curve mode uses
-the same temperature as the APU block.
+the same temperature as the processor block.
 
 ### Temperature
 
-The APU temperature is **not** the EC `0x70` byte. On current EVO-X2 firmware
-that register can sit near 97°C while Task Manager shows a GPU temperature in
-the 40s. Display, charts, and fan curves use one source, in this order:
+The processor block shows the **selected temperature source** (GPU by default)
+plus every sensor that is actually available:
 
-1. AMD GPU driver via WDDM (the same sensor Task Manager uses)
-2. AMD ADL, if the driver exposes it
-3. EC register `0x70`, only if both driver paths fail
+1. GPU via WDDM (the same sensor Task Manager uses), else AMD ADL GFX/Edge
+2. CPU via AMD ADL PMLOG, when the driver exposes it
+3. SoC via AMD ADL PMLOG, when the driver exposes it
+4. GPU hotspot via AMD ADL
+5. EC register `0x70` (ACPI CPUT). This is **not** accurate on current
+   EVO-X2 firmware (it can sit near 97°C)
 
-The GUI labels the source next to the number. `evox2ctl status` prints it in
-parentheses. `evox2ctl diagnose` also prints the raw EC `0x70` value so the
-two sensors can be compared.
+Choose the source in Settings. Fan curves and temperature alerts follow
+that choice. If the selected sensor is missing, the app falls back to GPU,
+then to EC `0x70`. `evox2ctl diagnose` prints every sensor plus the raw EC
+byte so they can be compared.
 
 ### Tray
 
@@ -113,13 +116,15 @@ Right-click for Quiet / Balanced / Performance, Show window, and Exit.
 ### Settings
 
 Open Settings from the gear in the main window header. Esc or the back
-control returns to APU and fan controls.
+control returns to processor and fan controls.
 
 - Close window: minimize to tray (default) or quit the program
 - Start with Windows: off by default; creates an on-logon Task Scheduler
   entry named `EVO-X2 Control` with highest privileges (required for PawnIO)
-- Language: 中文 (default) or English
-- Temperature alert: tray balloon when the APU temperature stays at or above
+- Language: English (default) or 中文
+- Temperature source: GPU (default), CPU, SoC, GPU hotspot, or EC 0x70.
+  This is the processor reading used for fan curves and alerts
+- Temperature alert: tray balloon when the processor temperature stays at or above
   the threshold (default 90°C, range 70–97). Alerts wait at least 10 minutes
   between notifications
 - Export / import configuration (native file dialog). Import validates fan
@@ -186,7 +191,7 @@ evox2ctl.exe mode balanced
 evox2ctl.exe mode performance
 ```
 
-`status` includes the APU temperature and its source. `diagnose` does not
+`status` includes the processor temperature and its source. `diagnose` does not
 change hardware state; it also prints the raw EC `0x70` temperature. CLI text
 follows the `language` value in `config.json`.
 
@@ -199,8 +204,9 @@ follows the `language` value in `config.json`.
 | `Unsupported hardware` | Confirm the machine is AXB35 / EVO-X2 |
 | `EC timeout waiting for input buffer to clear` | Another EC client may be holding the ports |
 | GUI cannot start | Confirm PawnIO is installed, the app is elevated, and no leftover service is running |
-| APU temperature near 97°C while Task Manager GPU is ~45°C | Use a build that reads the GPU driver; `diagnose` should show the driver value and a separate EC `0x70` raw value |
-| Temperature source says `EC 0x70` | AMD driver temperature was unavailable; confirm the AMD GPU driver is installed |
+| Processor temperature near 97°C while Task Manager GPU is ~45°C | Control temp should follow GPU/CPU/SoC from the AMD driver; `diagnose` still prints raw EC `0x70` |
+| Temperature source says `EC 0x70` | AMD driver temperatures were unavailable; confirm the AMD GPU driver is installed |
+| CPU or SoC missing in the processor card | The installed ADL/PMLOG path did not expose that sensor; GPU-only is still valid |
 | Settings did not come back | `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json` |
 
 ## Architecture
@@ -223,7 +229,7 @@ Configuration: `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`
   "log_path": "C:\\ProgramData\\ec-su_axb35-win\\server.log",
   "close_to_tray": true,
   "start_with_windows": false,
-  "language": "zh",
+  "language": "en",
   "temp_alert_enabled": true,
   "temp_alert_celsius": 90
 }
@@ -247,11 +253,11 @@ Actions builds the Windows binaries and publishes a Release:
 
 ```powershell
 # bump version in server/Cargo.toml first, then:
-git tag v2.2.0
-git push origin v2.2.0
+git tag v2.3.0
+git push origin v2.3.0
 ```
 
-The tag must look like `v2.2.0` and match Cargo. The Release includes
+The tag must look like `v2.3.0` and match Cargo. The Release includes
 `evox2-control.exe`, `evox2ctl.exe`, a zip of both, and the NSIS installer
 when NSIS is available. Optional Authenticode signing runs only when
 `SIGNING_PFX` / `SIGNING_PASSWORD` secrets exist. PawnIO is not bundled.

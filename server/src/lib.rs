@@ -108,7 +108,7 @@ fn emit_cli_error(json: bool, error: &cli::CliError) {
 fn current_language() -> Language {
     ServerConfig::load()
         .map(|config| config.language())
-        .unwrap_or(Language::Zh)
+        .unwrap_or(Language::En)
 }
 
 fn sync_start_with_windows(session: &AppSession) {

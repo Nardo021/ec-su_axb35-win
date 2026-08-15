@@ -1,9 +1,10 @@
-//! APU temperature used for display and fan curves.
+//! Processor temperatures used for display and fan curves.
 //!
 //! EC register `0x70` is the ACPI CPUT byte. On current EVO-X2 firmware that
-//! value does not match the AMD GPU sensor shown in Task Manager. Prefer the
-//! WDDM adapter temperature (same path as Task Manager), then AMD ADL, then
-//! the EC byte.
+//! value does not match AMD's sensors (it often sits near 97°C). Prefer AMD
+//! driver readings: WDDM GPU (Task Manager), then ADL GPU / CPU / SoC /
+//! hotspot. Fan curves and alerts follow the sensor selected in Settings
+//! (GPU by default).
 
 use std::ffi::c_void;
 use std::mem::{size_of, MaybeUninit};
@@ -20,6 +21,7 @@ const KMTQAITYPE_ADAPTERPERFDATA: i32 = 62;
 const ADAPTER_TYPE_SOFTWARE_DEVICE: u32 = 1 << 2;
 const ADL_OK: i32 = 0;
 const ADL_PMLOG_TEMPERATURE_EDGE: usize = 8;
+const ADL_PMLOG_TEMPERATURE_HOTSPOT: usize = 27;
 const ADL_PMLOG_TEMPERATURE_GFX: usize = 28;
 const ADL_PMLOG_TEMPERATURE_SOC: usize = 29;
 const ADL_PMLOG_TEMPERATURE_CPU: usize = 32;
@@ -28,48 +30,144 @@ const ADL_PMLOG_MAX_SENSORS: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemperatureSource {
     Gpu,
-    Adl,
+    Cpu,
+    Soc,
+    Hotspot,
     Ec,
 }
 
 impl TemperatureSource {
+    pub const ALL: [TemperatureSource; 5] = [
+        TemperatureSource::Gpu,
+        TemperatureSource::Cpu,
+        TemperatureSource::Soc,
+        TemperatureSource::Hotspot,
+        TemperatureSource::Ec,
+    ];
+
+    pub fn from_code(code: &str) -> Self {
+        match code {
+            "cpu" => TemperatureSource::Cpu,
+            "soc" => TemperatureSource::Soc,
+            "hotspot" => TemperatureSource::Hotspot,
+            "ec" => TemperatureSource::Ec,
+            _ => TemperatureSource::Gpu,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            TemperatureSource::Gpu => "gpu",
+            TemperatureSource::Cpu => "cpu",
+            TemperatureSource::Soc => "soc",
+            TemperatureSource::Hotspot => "hotspot",
+            TemperatureSource::Ec => "ec",
+        }
+    }
+
     pub fn i18n_key(self) -> &'static str {
         match self {
             TemperatureSource::Gpu => "temp_src_gpu",
-            TemperatureSource::Adl => "temp_src_adl",
+            TemperatureSource::Cpu => "temp_src_cpu",
+            TemperatureSource::Soc => "temp_src_soc",
+            TemperatureSource::Hotspot => "temp_src_hotspot",
             TemperatureSource::Ec => "temp_src_ec",
         }
     }
 
     pub fn as_log_str(self) -> &'static str {
         match self {
-            TemperatureSource::Gpu => "GPU driver (Task Manager)",
-            TemperatureSource::Adl => "AMD ADL",
+            TemperatureSource::Gpu => "GPU (Task Manager / ADL)",
+            TemperatureSource::Cpu => "CPU (AMD ADL)",
+            TemperatureSource::Soc => "SoC (AMD ADL)",
+            TemperatureSource::Hotspot => "GPU hotspot (AMD ADL)",
             TemperatureSource::Ec => "EC 0x70",
         }
     }
 }
 
-pub fn resolve_temperature(ec_celsius: u8) -> u8 {
-    resolve_with_source(ec_celsius).0
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalSnapshot {
+    pub gpu: Option<u8>,
+    pub cpu: Option<u8>,
+    pub soc: Option<u8>,
+    pub hotspot: Option<u8>,
+    pub ec_raw: u8,
+    pub control: u8,
+    pub control_source: TemperatureSource,
 }
 
-pub fn resolve_with_source(ec_celsius: u8) -> (u8, TemperatureSource) {
-    if let Some(temp) = read_wddm_gpu_temp() {
-        return (temp, TemperatureSource::Gpu);
+pub fn resolve_temperature(ec_celsius: u8, preferred: TemperatureSource) -> u8 {
+    read_thermal(ec_celsius, preferred).control
+}
+
+pub fn read_thermal(ec_celsius: u8, preferred: TemperatureSource) -> ThermalSnapshot {
+    let adl = read_adl_sensors();
+    let gpu = read_wddm_gpu_temp().or(adl.gpu).or_else(read_adl_od5_gpu);
+    let (control, control_source) =
+        pick_control_temp(preferred, gpu, adl.cpu, adl.soc, adl.hotspot, ec_celsius);
+    ThermalSnapshot {
+        gpu,
+        cpu: adl.cpu,
+        soc: adl.soc,
+        hotspot: adl.hotspot,
+        ec_raw: ec_celsius,
+        control,
+        control_source,
     }
-    if let Some(temp) = read_adl_gpu_temp() {
-        return (temp, TemperatureSource::Adl);
+}
+
+pub fn pick_control_temp(
+    preferred: TemperatureSource,
+    gpu: Option<u8>,
+    cpu: Option<u8>,
+    soc: Option<u8>,
+    hotspot: Option<u8>,
+    ec_celsius: u8,
+) -> (u8, TemperatureSource) {
+    let selected = match preferred {
+        TemperatureSource::Gpu => gpu.map(|temp| (temp, TemperatureSource::Gpu)),
+        TemperatureSource::Cpu => cpu.map(|temp| (temp, TemperatureSource::Cpu)),
+        TemperatureSource::Soc => soc.map(|temp| (temp, TemperatureSource::Soc)),
+        TemperatureSource::Hotspot => hotspot.map(|temp| (temp, TemperatureSource::Hotspot)),
+        TemperatureSource::Ec => Some((ec_celsius, TemperatureSource::Ec)),
+    };
+    if let Some(pair) = selected {
+        return pair;
+    }
+    if let Some(temp) = gpu {
+        return (temp, TemperatureSource::Gpu);
     }
     (ec_celsius, TemperatureSource::Ec)
 }
 
-pub fn describe_source(ec_celsius: u8) -> String {
-    let (temp, source) = resolve_with_source(ec_celsius);
+pub fn describe_source(ec_celsius: u8, preferred: TemperatureSource) -> String {
+    let snap = read_thermal(ec_celsius, preferred);
     format!(
-        "APU temperature {temp}°C from {} (EC 0x70 = {ec_celsius}°C)",
-        source.as_log_str()
+        "Control {control}°C from {source} (preferred={preferred}, GPU={gpu}, CPU={cpu}, SoC={soc}, hotspot={hotspot}, EC 0x70={ec}°C)",
+        control = snap.control,
+        source = snap.control_source.as_log_str(),
+        preferred = preferred.as_log_str(),
+        gpu = fmt_opt(snap.gpu),
+        cpu = fmt_opt(snap.cpu),
+        soc = fmt_opt(snap.soc),
+        hotspot = fmt_opt(snap.hotspot),
+        ec = snap.ec_raw
     )
+}
+
+fn fmt_opt(value: Option<u8>) -> String {
+    value
+        .map(|temp| format!("{temp}°C"))
+        .unwrap_or_else(|| "n/a".into())
+}
+
+#[derive(Clone, Copy, Default)]
+struct AdlSensors {
+    gpu: Option<u8>,
+    cpu: Option<u8>,
+    soc: Option<u8>,
+    hotspot: Option<u8>,
 }
 
 fn plausible_celsius(value: u32) -> Option<u8> {
@@ -365,53 +463,85 @@ unsafe extern "system" fn adl_malloc(size: i32) -> *mut c_void {
     malloc(size as usize)
 }
 
-fn read_adl_gpu_temp() -> Option<u8> {
-    let api = adl_api()?;
-    let api = api.lock().ok()?;
-    unsafe { query_adl(&api) }
+fn read_adl_sensors() -> AdlSensors {
+    let Some(api) = adl_api() else {
+        return AdlSensors::default();
+    };
+    let Ok(api) = api.lock() else {
+        return AdlSensors::default();
+    };
+    unsafe { query_adl_sensors(&api) }
 }
 
-unsafe fn query_adl(api: &AdlApi) -> Option<u8> {
+fn read_adl_od5_gpu() -> Option<u8> {
+    let api = adl_api()?;
+    let api = api.lock().ok()?;
+    unsafe { query_adl_od5(&api) }
+}
+
+unsafe fn query_adl_od5(api: &AdlApi) -> Option<u8> {
+    let od5 = api.od5_temp?;
     let mut num = 0i32;
     if (api.adapter_count)(api.context, &mut num) != ADL_OK || num <= 0 {
         return None;
     }
-
     for index in 0..num {
-        if let Some(od5) = api.od5_temp {
-            let mut temp = AdlTemperature {
-                size: size_of::<AdlTemperature>() as i32,
-                temperature: 0,
-            };
-            if od5(api.context, index, 0, &mut temp) == ADL_OK {
-                if let Some(celsius) = millicelsius_to_u8(temp.temperature) {
-                    return Some(celsius);
-                }
-            }
-        }
-        if let Some(pmlog) = api.pmlog {
-            let mut output = AdlPmLogDataOutput {
-                size: size_of::<AdlPmLogDataOutput>() as i32,
-                sensors: [AdlSingleSensorData {
-                    supported: 0,
-                    value: 0,
-                }; ADL_PMLOG_MAX_SENSORS],
-            };
-            if pmlog(api.context, index, &mut output) == ADL_OK {
-                for sensor in [
-                    ADL_PMLOG_TEMPERATURE_GFX,
-                    ADL_PMLOG_TEMPERATURE_EDGE,
-                    ADL_PMLOG_TEMPERATURE_SOC,
-                    ADL_PMLOG_TEMPERATURE_CPU,
-                ] {
-                    if let Some(celsius) = pmlog_sensor(&output, sensor) {
-                        return Some(celsius);
-                    }
-                }
+        let mut temp = AdlTemperature {
+            size: size_of::<AdlTemperature>() as i32,
+            temperature: 0,
+        };
+        if od5(api.context, index, 0, &mut temp) == ADL_OK {
+            if let Some(celsius) = millicelsius_to_u8(temp.temperature) {
+                return Some(celsius);
             }
         }
     }
     None
+}
+
+unsafe fn query_adl_sensors(api: &AdlApi) -> AdlSensors {
+    let mut sensors = AdlSensors::default();
+    let Some(pmlog) = api.pmlog else {
+        return sensors;
+    };
+    let mut num = 0i32;
+    if (api.adapter_count)(api.context, &mut num) != ADL_OK || num <= 0 {
+        return sensors;
+    }
+
+    for index in 0..num {
+        let mut output = AdlPmLogDataOutput {
+            size: size_of::<AdlPmLogDataOutput>() as i32,
+            sensors: [AdlSingleSensorData {
+                supported: 0,
+                value: 0,
+            }; ADL_PMLOG_MAX_SENSORS],
+        };
+        if pmlog(api.context, index, &mut output) != ADL_OK {
+            continue;
+        }
+        sensors.gpu = sensors
+            .gpu
+            .or_else(|| pmlog_sensor(&output, ADL_PMLOG_TEMPERATURE_GFX))
+            .or_else(|| pmlog_sensor(&output, ADL_PMLOG_TEMPERATURE_EDGE));
+        sensors.cpu = sensors
+            .cpu
+            .or_else(|| pmlog_sensor(&output, ADL_PMLOG_TEMPERATURE_CPU));
+        sensors.soc = sensors
+            .soc
+            .or_else(|| pmlog_sensor(&output, ADL_PMLOG_TEMPERATURE_SOC));
+        sensors.hotspot = sensors
+            .hotspot
+            .or_else(|| pmlog_sensor(&output, ADL_PMLOG_TEMPERATURE_HOTSPOT));
+        if sensors.gpu.is_some()
+            && sensors.cpu.is_some()
+            && sensors.soc.is_some()
+            && sensors.hotspot.is_some()
+        {
+            break;
+        }
+    }
+    sensors
 }
 
 fn pmlog_sensor(output: &AdlPmLogDataOutput, index: usize) -> Option<u8> {
@@ -463,12 +593,103 @@ mod tests {
     }
 
     #[test]
+    fn pick_control_uses_preferred_sensor() {
+        assert_eq!(
+            pick_control_temp(
+                TemperatureSource::Gpu,
+                Some(48),
+                Some(62),
+                Some(51),
+                Some(80),
+                97
+            ),
+            (48, TemperatureSource::Gpu)
+        );
+        assert_eq!(
+            pick_control_temp(
+                TemperatureSource::Cpu,
+                Some(48),
+                Some(62),
+                Some(51),
+                Some(80),
+                97
+            ),
+            (62, TemperatureSource::Cpu)
+        );
+        assert_eq!(
+            pick_control_temp(
+                TemperatureSource::Hotspot,
+                Some(48),
+                Some(62),
+                Some(51),
+                Some(80),
+                97
+            ),
+            (80, TemperatureSource::Hotspot)
+        );
+        assert_eq!(
+            pick_control_temp(
+                TemperatureSource::Ec,
+                Some(48),
+                Some(62),
+                Some(51),
+                Some(80),
+                97
+            ),
+            (97, TemperatureSource::Ec)
+        );
+    }
+
+    #[test]
+    fn pick_control_falls_back_to_gpu_then_ec() {
+        assert_eq!(
+            pick_control_temp(
+                TemperatureSource::Cpu,
+                Some(55),
+                None,
+                Some(51),
+                Some(80),
+                97
+            ),
+            (55, TemperatureSource::Gpu)
+        );
+        assert_eq!(
+            pick_control_temp(
+                TemperatureSource::Gpu,
+                None,
+                Some(62),
+                Some(51),
+                Some(80),
+                42
+            ),
+            (42, TemperatureSource::Ec)
+        );
+        assert_eq!(
+            pick_control_temp(TemperatureSource::Soc, None, None, None, None, 42),
+            (42, TemperatureSource::Ec)
+        );
+    }
+
+    #[test]
+    fn temperature_source_defaults_unknown_to_gpu() {
+        assert_eq!(TemperatureSource::from_code("gpu"), TemperatureSource::Gpu);
+        assert_eq!(TemperatureSource::from_code(""), TemperatureSource::Gpu);
+        assert_eq!(TemperatureSource::from_code("nope"), TemperatureSource::Gpu);
+        assert_eq!(
+            TemperatureSource::from_code("hotspot"),
+            TemperatureSource::Hotspot
+        );
+        assert_eq!(TemperatureSource::from_code("ec").code(), "ec");
+    }
+
+    #[test]
     fn ec_fallback_used_when_gpu_apis_return_nothing() {
-        let (temp, source) = resolve_with_source(42);
-        if source == TemperatureSource::Ec {
-            assert_eq!(temp, 42);
+        let snap = read_thermal(42, TemperatureSource::Gpu);
+        if snap.control_source == TemperatureSource::Ec {
+            assert_eq!(snap.control, 42);
+            assert_eq!(snap.ec_raw, 42);
         } else {
-            assert!((10..=115).contains(&temp));
+            assert!((10..=115).contains(&snap.control));
         }
     }
 }
