@@ -94,11 +94,13 @@ fn current_language() -> Language {
 }
 
 fn sync_start_with_windows(session: &AppSession) {
-    let enabled = session.config.lock().unwrap().start_with_windows;
-    if platform::is_start_with_windows() == enabled {
+    let actual = platform::is_start_with_windows();
+    let mut config = session.config.lock().unwrap();
+    if config.start_with_windows == actual {
         return;
     }
-    if let Err(error) = platform::set_start_with_windows(enabled) {
+    config.start_with_windows = actual;
+    if let Err(error) = config.save() {
         session
             .logger
             .lock()

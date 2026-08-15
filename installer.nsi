@@ -1,7 +1,7 @@
 ; ec-su_axb35-win Installer
 
 !define PRODUCT_NAME "ec-su_axb35-win"
-!define PRODUCT_VERSION "2.0.0"
+!define PRODUCT_VERSION "2.1.0"
 !define PRODUCT_PUBLISHER "deseven"
 !define PRODUCT_WEB_SITE "https://github.com/deseven/ec-su_axb35-win"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\evox2-control.exe"
@@ -59,7 +59,7 @@ ShowUnInstDetails show
 RequestExecutionLevel admin
 
 ; Version Information
-VIProductVersion "2.0.0.0"
+VIProductVersion "2.1.0.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "Comments" "EC SU_AXB35 WIN Installer"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"

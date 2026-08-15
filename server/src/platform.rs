@@ -1,8 +1,9 @@
+use std::os::windows::process::CommandExt;
+use std::process::Command;
 use std::ptr;
 
-use winapi::shared::minwindef::DWORD;
-use winapi::shared::winerror::ERROR_ALREADY_EXISTS;
-use winapi::shared::winerror::ERROR_SUCCESS;
+use winapi::shared::minwindef::{DWORD, HKEY};
+use winapi::shared::winerror::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::libloaderapi::GetModuleFileNameW;
@@ -10,10 +11,13 @@ use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
 use winapi::um::securitybaseapi::GetTokenInformation;
 use winapi::um::synchapi::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use winapi::um::winbase::WAIT_OBJECT_0;
-use winapi::um::winnt::{HANDLE, KEY_READ, KEY_SET_VALUE, REG_SZ, TOKEN_ELEVATION, TOKEN_QUERY};
+use winapi::um::winnt::{
+    HANDLE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, REG_SZ, TOKEN_ELEVATION,
+    TOKEN_QUERY,
+};
 use winapi::um::winreg::{
-    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER,
+    HKEY_LOCAL_MACHINE,
 };
 
 use crate::hardware::read_reg_string;
@@ -23,6 +27,10 @@ const ACCESS_EC_TIMEOUT_MS: DWORD = 5_000;
 pub const ALREADY_RUNNING: &str = "ALREADY_RUNNING";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "EVO-X2 Control";
+const STARTUP_TASK_NAME: &str = "EVO-X2 Control";
+const STARTUP_APPROVED_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn is_admin() -> bool {
     unsafe {
@@ -191,68 +199,162 @@ pub fn current_exe_path() -> Result<String, String> {
 }
 
 pub fn is_start_with_windows() -> bool {
-    let Some(stored) = read_run_value() else {
+    if scheduled_task_registered() {
+        return true;
+    }
+    let Ok(exe) = current_exe_path() else {
         return false;
     };
-    current_exe_path()
-        .map(|path| {
-            stored.eq_ignore_ascii_case(&path)
-                || stored.eq_ignore_ascii_case(&format!("\"{path}\""))
-        })
-        .unwrap_or(false)
+    for stored in [
+        read_run_value(HKEY_CURRENT_USER),
+        read_run_value(HKEY_LOCAL_MACHINE),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if run_value_matches(&stored, &exe) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
-    let key_w = wide(RUN_KEY);
-    let name_w = wide(RUN_VALUE);
-    let mut key = ptr::null_mut();
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            key_w.as_ptr(),
-            0,
-            KEY_SET_VALUE | KEY_READ,
-            &mut key,
-        )
-    };
-    if status != ERROR_SUCCESS as i32 {
-        return Err(format!("Failed to open HKCU Run key ({status})"));
-    }
-    let result = if enabled {
-        let path = current_exe_path()?;
-        let quoted = format!("\"{path}\"");
-        let value = wide(&quoted);
-        let bytes = (value.len() * 2) as DWORD;
-        let status = unsafe {
-            RegSetValueExW(
-                key,
-                name_w.as_ptr(),
-                0,
-                REG_SZ,
-                value.as_ptr() as *const u8,
-                bytes,
-            )
-        };
-        if status == ERROR_SUCCESS as i32 {
-            Ok(())
-        } else {
-            Err(format!("Failed to write HKCU Run value ({status})"))
+    if enabled {
+        let exe = current_exe_path()?;
+        let output = run_schtasks(&schtasks_create_args(&exe))?;
+        if !output.success {
+            return Err(format!(
+                "Failed to register logon task ({})",
+                output.message
+            ));
         }
-    } else {
-        unsafe { RegDeleteValueW(key, name_w.as_ptr()) };
+        let _ = remove_legacy_run_entries();
+        if !scheduled_task_registered() {
+            return Err("Logon task was not registered".to_string());
+        }
         Ok(())
-    };
-    unsafe { RegCloseKey(key) };
-    result
+    } else {
+        let output = run_schtasks(&schtasks_delete_args())?;
+        if !output.success && !schtasks_missing_task(&output.message) {
+            return Err(format!("Failed to remove logon task ({})", output.message));
+        }
+        remove_legacy_run_entries()?;
+        if scheduled_task_registered() {
+            return Err("Logon task is still registered".to_string());
+        }
+        Ok(())
+    }
 }
 
-fn read_run_value() -> Option<String> {
+pub(crate) fn run_value_matches(stored: &str, exe_path: &str) -> bool {
+    normalize_run_path(stored).eq_ignore_ascii_case(&normalize_run_path(exe_path))
+}
+
+pub(crate) fn registry_delete_succeeded(status: i32) -> bool {
+    status == ERROR_SUCCESS as i32 || status == ERROR_FILE_NOT_FOUND as i32
+}
+
+pub(crate) fn schtasks_create_args(exe_path: &str) -> Vec<String> {
+    vec![
+        "/Create".into(),
+        "/TN".into(),
+        STARTUP_TASK_NAME.into(),
+        "/TR".into(),
+        format!("\"{exe_path}\""),
+        "/SC".into(),
+        "ONLOGON".into(),
+        "/RL".into(),
+        "HIGHEST".into(),
+        "/F".into(),
+    ]
+}
+
+pub(crate) fn schtasks_delete_args() -> Vec<String> {
+    vec![
+        "/Delete".into(),
+        "/TN".into(),
+        STARTUP_TASK_NAME.into(),
+        "/F".into(),
+    ]
+}
+
+pub(crate) fn schtasks_query_args() -> Vec<String> {
+    vec!["/Query".into(), "/TN".into(), STARTUP_TASK_NAME.into()]
+}
+
+pub(crate) fn schtasks_missing_task(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("cannot find")
+        || lower.contains("the system cannot find")
+        || lower.contains("does not exist")
+        || lower.contains("cannot find the path")
+        || message.contains("找不到")
+        || message.contains("系统找不到")
+        || message.contains("不存在")
+}
+
+fn normalize_run_path(value: &str) -> String {
+    value.trim().trim_matches('"').to_string()
+}
+
+fn scheduled_task_registered() -> bool {
+    run_schtasks(&schtasks_query_args())
+        .map(|output| output.success)
+        .unwrap_or(false)
+}
+
+fn remove_legacy_run_entries() -> Result<(), String> {
+    delete_run_value(HKEY_CURRENT_USER, KEY_SET_VALUE | KEY_READ)?;
+    delete_run_value(
+        HKEY_LOCAL_MACHINE,
+        KEY_SET_VALUE | KEY_READ | KEY_WOW64_64KEY,
+    )?;
+    let _ = delete_named_value(
+        HKEY_CURRENT_USER,
+        STARTUP_APPROVED_KEY,
+        RUN_VALUE,
+        KEY_SET_VALUE | KEY_READ,
+    );
+    Ok(())
+}
+
+fn delete_run_value(root: HKEY, access: u32) -> Result<(), String> {
+    delete_named_value(root, RUN_KEY, RUN_VALUE, access)
+}
+
+fn delete_named_value(root: HKEY, subkey: &str, name: &str, access: u32) -> Result<(), String> {
+    let key_w = wide(subkey);
+    let name_w = wide(name);
+    let mut key = ptr::null_mut();
+    let status = unsafe { RegOpenKeyExW(root, key_w.as_ptr(), 0, access, &mut key) };
+    if status != ERROR_SUCCESS as i32 {
+        if status == ERROR_FILE_NOT_FOUND as i32 {
+            return Ok(());
+        }
+        return Err(format!("Failed to open startup registry key ({status})"));
+    }
+    let status = unsafe { RegDeleteValueW(key, name_w.as_ptr()) };
+    unsafe { RegCloseKey(key) };
+    if registry_delete_succeeded(status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to remove startup registry value ({status})"
+        ))
+    }
+}
+
+fn read_run_value(root: HKEY) -> Option<String> {
     let key_w = wide(RUN_KEY);
     let name_w = wide(RUN_VALUE);
     let mut key = ptr::null_mut();
-    if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, key_w.as_ptr(), 0, KEY_READ, &mut key) }
-        != ERROR_SUCCESS as i32
-    {
+    let access = if std::ptr::eq(root, HKEY_LOCAL_MACHINE) {
+        KEY_READ | KEY_WOW64_64KEY
+    } else {
+        KEY_READ
+    };
+    if unsafe { RegOpenKeyExW(root, key_w.as_ptr(), 0, access, &mut key) } != ERROR_SUCCESS as i32 {
         return None;
     }
     let mut kind: DWORD = 0;
@@ -289,14 +391,167 @@ fn read_run_value() -> Option<String> {
     }
     let words =
         unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u16, (size as usize) / 2) };
-    Some(
-        String::from_utf16_lossy(words)
-            .trim_end_matches('\0')
-            .trim_matches('"')
-            .to_string(),
-    )
+    Some(normalize_run_path(
+        String::from_utf16_lossy(words).trim_end_matches('\0'),
+    ))
+}
+
+struct SchtasksOutput {
+    success: bool,
+    message: String,
+}
+
+fn run_schtasks(args: &[String]) -> Result<SchtasksOutput, String> {
+    let exe = schtasks_exe();
+    let output = Command::new(&exe)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("Failed to run {exe}: {error}"))?;
+    let mut message = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        if !message.trim().is_empty() {
+            message.push('\n');
+        }
+        message.push_str(stderr.trim());
+    }
+    Ok(SchtasksOutput {
+        success: output.status.success(),
+        message: message.trim().to_string(),
+    })
+}
+
+fn schtasks_exe() -> String {
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
+    format!(r"{windir}\System32\schtasks.exe")
 }
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiChrome {
+    pub dark: bool,
+    pub accent: (u8, u8, u8),
+}
+
+pub fn ui_chrome() -> UiChrome {
+    UiChrome {
+        dark: !apps_use_light_theme(),
+        accent: accent_color_rgb().unwrap_or((0, 120, 212)),
+    }
+}
+
+pub fn apps_use_light_theme() -> bool {
+    read_hkcu_dword(
+        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        "AppsUseLightTheme",
+    )
+    .map(|value| value != 0)
+    .unwrap_or(true)
+}
+
+pub fn accent_color_rgb() -> Option<(u8, u8, u8)> {
+    read_hkcu_dword(r"Software\Microsoft\Windows\DWM", "AccentColor")
+        .or_else(|| read_hkcu_dword(r"Software\Microsoft\Windows\DWM", "ColorizationColor"))
+        .map(accent_from_abgr)
+        .filter(|&(r, g, b)| r != 0 || g != 0 || b != 0)
+}
+
+pub(crate) fn accent_from_abgr(abgr: u32) -> (u8, u8, u8) {
+    (
+        (abgr & 0xFF) as u8,
+        ((abgr >> 8) & 0xFF) as u8,
+        ((abgr >> 16) & 0xFF) as u8,
+    )
+}
+
+fn read_hkcu_dword(subkey: &str, value_name: &str) -> Option<u32> {
+    unsafe {
+        let subkey_w = wide(subkey);
+        let mut key = ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey_w.as_ptr(), 0, KEY_READ, &mut key)
+            != ERROR_SUCCESS as i32
+        {
+            return None;
+        }
+        let name_w = wide(value_name);
+        let mut kind: DWORD = 0;
+        let mut data: DWORD = 0;
+        let mut size = std::mem::size_of::<DWORD>() as DWORD;
+        let status = RegQueryValueExW(
+            key,
+            name_w.as_ptr(),
+            ptr::null_mut(),
+            &mut kind,
+            &mut data as *mut DWORD as *mut u8,
+            &mut size,
+        );
+        RegCloseKey(key);
+        if status == ERROR_SUCCESS as i32 && kind == REG_DWORD {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_value_matches_quoted_and_unquoted_paths() {
+        let exe = r"C:\Program Files\ec-su_axb35-win\evox2-control.exe";
+        assert!(run_value_matches(exe, exe));
+        assert!(run_value_matches(&format!("\"{exe}\""), exe));
+        assert!(run_value_matches(exe, &format!("\"{exe}\"")));
+        assert!(!run_value_matches(
+            r"C:\Program Files\other\evox2-control.exe",
+            exe
+        ));
+    }
+
+    #[test]
+    fn registry_delete_treats_missing_value_as_success() {
+        assert!(registry_delete_succeeded(ERROR_SUCCESS as i32));
+        assert!(registry_delete_succeeded(ERROR_FILE_NOT_FOUND as i32));
+        assert!(!registry_delete_succeeded(5));
+    }
+
+    #[test]
+    fn logon_task_is_created_elevated() {
+        let args = schtasks_create_args(r"C:\Program Files\ec-su_axb35-win\evox2-control.exe");
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "/SC" && pair[1] == "ONLOGON"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "/RL" && pair[1] == "HIGHEST"));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "/TR" && pair[1] == r#""C:\Program Files\ec-su_axb35-win\evox2-control.exe""#
+        }));
+        assert!(args.contains(&"/F".to_string()));
+    }
+
+    #[test]
+    fn missing_task_messages_are_recognized() {
+        assert!(schtasks_missing_task(
+            r#"ERROR: The specified task name "EVO-X2 Control" does not exist in the system."#
+        ));
+        assert!(schtasks_missing_task(
+            "ERROR: The system cannot find the file specified."
+        ));
+        assert!(schtasks_missing_task("系统找不到指定的文件。"));
+        assert!(schtasks_missing_task("指定的任务名不存在"));
+        assert!(!schtasks_missing_task("Access is denied."));
+    }
+
+    #[test]
+    fn accent_from_abgr_matches_windows_layout() {
+        assert_eq!(accent_from_abgr(0xFF_D4_78_00), (0x00, 0x78, 0xD4));
+        assert_eq!(accent_from_abgr(0x00_00_00_FF), (0xFF, 0x00, 0x00));
+    }
 }

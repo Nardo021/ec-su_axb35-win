@@ -62,6 +62,8 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "hint_curve") => "Hint: 5 temperature thresholds (°C), comma separated.",
         (Language::Zh, "settings") => "设置",
         (Language::En, "settings") => "Settings",
+        (Language::Zh, "back") => "返回",
+        (Language::En, "back") => "Back",
         (Language::Zh, "close_window") => "关闭窗口",
         (Language::En, "close_window") => "Close window",
         (Language::Zh, "close_to_tray") => "最小化到托盘",
@@ -76,6 +78,10 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "lang_zh") => "中文",
         (Language::Zh, "lang_en") => "English",
         (Language::En, "lang_en") => "English",
+        (Language::Zh, "edit") => "编辑",
+        (Language::En, "edit") => "Edit",
+        (Language::Zh, "apply") => "应用",
+        (Language::En, "apply") => "Apply",
         (Language::Zh, "show_window") => "显示窗口",
         (Language::En, "show_window") => "Show window",
         (Language::Zh, "exit") => "退出",
@@ -193,7 +199,9 @@ mod tests {
         assert_eq!(Language::from_code("zh"), Language::Zh);
         assert_eq!(Language::from_code("de"), Language::Zh);
         assert_eq!(Language::from_code("en"), Language::En);
-        assert_eq!(t(Language::Zh, "quiet"), "安静");
-        assert_eq!(t(Language::En, "quiet"), "Quiet");
+        assert_eq!(t(Language::Zh, "apply"), "应用");
+        assert_eq!(t(Language::En, "edit"), "Edit");
+        assert_eq!(t(Language::Zh, "back"), "返回");
+        assert_eq!(t(Language::En, "settings"), "Settings");
     }
 }

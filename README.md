@@ -29,7 +29,7 @@ secure configuration.
 
 1. Install the official PawnIO release from https://pawnio.eu/.
 2. Download the latest [GitHub Release](https://github.com/Nardo021/ec-su_axb35-win/releases),
-   run `ec-su_axb35-win-installer-2.0.0.exe` as Administrator, or copy the
+   run `ec-su_axb35-win-installer-2.1.0.exe` as Administrator, or copy the
    binaries from `dist/`.
 3. Double-click `evox2-control.exe`. That is the only program you need.
 4. Closing the window hides it to the tray by default. Curve monitoring keeps
@@ -108,10 +108,12 @@ Right-click for Quiet / Balanced / Performance, Show window, and Exit.
 
 ### Settings
 
-On the same window:
+Open Settings from the gear in the main window header. Esc or the back
+control returns to APU and fan controls.
 
 - Close window: minimize to tray (default) or quit the program
-- Start with Windows: off by default; writes `HKCU\...\Run` as `EVO-X2 Control`
+- Start with Windows: off by default; creates an on-logon Task Scheduler
+  entry named `EVO-X2 Control` with highest privileges (required for PawnIO)
 - Language: 中文 (default) or English
 
 There is no Windows service and no REST API.
@@ -193,12 +195,14 @@ Actions builds the Windows binaries and publishes a Release:
 
 ```powershell
 # bump version in server/Cargo.toml first, then:
-git tag v2.0.1
-git push origin v2.0.1
+git tag v2.1.0
+git push origin v2.1.0
 ```
 
-The tag must look like `v2.0.1` and match Cargo. The Release includes
+The tag must look like `v2.1.0` and match Cargo. The Release includes
 `evox2-control.exe`, `evox2ctl.exe`, and a zip of both. PawnIO is not bundled.
+
+Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Building from source
 
