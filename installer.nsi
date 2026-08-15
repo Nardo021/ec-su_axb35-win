@@ -1,56 +1,38 @@
-; ec-su_axb35-win Installer
+; EVO-X2 Control installer (single-process GUI + CLI)
 
 !define PRODUCT_NAME "ec-su_axb35-win"
-!define PRODUCT_VERSION "2.1.0"
-!define PRODUCT_PUBLISHER "deseven"
-!define PRODUCT_WEB_SITE "https://github.com/deseven/ec-su_axb35-win"
+!define PRODUCT_DISPLAY_NAME "EVO-X2 Control"
+!define PRODUCT_VERSION "2.2.0"
+!define PRODUCT_PUBLISHER "Nardo021"
+!define PRODUCT_WEB_SITE "https://github.com/Nardo021/ec-su_axb35-win"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\evox2-control.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
-
-!define SERVICE_NAME "ec-su_axb35-win"
-!define SERVICE_DISPLAY_NAME "EVO-X2 Control"
-!define SERVICE_DESCRIPTION "Optional background service for EVO-X2 / SU_AXB35 EC control"
-
-; Installation directories
+!define LEGACY_SERVICE_NAME "ec-su_axb35-win"
 !define INSTALL_DIR "$PROGRAMFILES64\ec-su_axb35-win"
 
-; Include required headers
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "FileFunc.nsh"
 !include "WinMessages.nsh"
 
-; MUI Settings
 !define MUI_ABORTWARNING
 !define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
 !define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
 
-; Welcome page
 !insertmacro MUI_PAGE_WELCOME
-; License page (optional - uncomment if you have a license file)
-; !insertmacro MUI_PAGE_LICENSE "license.txt"
-; Directory page
+!insertmacro MUI_PAGE_LICENSE "LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
-; Instfiles page
 !insertmacro MUI_PAGE_INSTFILES
-; Finish page with option to run client
 !define MUI_FINISHPAGE_RUN "$INSTDIR\evox2-control.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Run EVO-X2 Control"
 !insertmacro MUI_PAGE_FINISH
-
-; Uninstaller pages
 !insertmacro MUI_UNPAGE_INSTFILES
-
-; Language files
 !insertmacro MUI_LANGUAGE "English"
+!insertmacro MUI_LANGUAGE "SimpChinese"
+!insertmacro MUI_RESERVEFILE_LANGDLL
 
-; Reserve files (MUI_RESERVEFILE_INSTALLOPTIONS is deprecated in MUI2)
-; Use ReserveFile if needed for specific plugins
-
-; MUI end ------
-
-Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
+Name "${PRODUCT_DISPLAY_NAME} ${PRODUCT_VERSION}"
 OutFile "ec-su_axb35-win-installer-${PRODUCT_VERSION}.exe"
 InstallDir "${INSTALL_DIR}"
 InstallDirRegKey HKLM "${PRODUCT_DIR_REGKEY}" ""
@@ -58,27 +40,23 @@ ShowInstDetails show
 ShowUnInstDetails show
 RequestExecutionLevel admin
 
-; Version Information
-VIProductVersion "2.1.0.0"
-VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
-VIAddVersionKey "Comments" "EC SU_AXB35 WIN Installer"
+VIProductVersion "2.2.0.0"
+VIAddVersionKey "ProductName" "${PRODUCT_DISPLAY_NAME}"
+VIAddVersionKey "Comments" "Single-process GUI for EVO-X2 / SU_AXB35 EC control"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
 VIAddVersionKey "LegalTrademarks" ""
-VIAddVersionKey "LegalCopyright" "© ${PRODUCT_PUBLISHER}"
-VIAddVersionKey "FileDescription" "${PRODUCT_NAME} Installer"
+VIAddVersionKey "LegalCopyright" "© deseven, ${PRODUCT_PUBLISHER}"
+VIAddVersionKey "FileDescription" "${PRODUCT_DISPLAY_NAME} Installer"
 VIAddVersionKey "FileVersion" "${PRODUCT_VERSION}"
 
 Function .onInit
-  ; This is important to have $APPDATA variable
-  ; point to ProgramData folder instead of current user's Roaming folder
+  !insertmacro MUI_LANGDLL_DISPLAY
   SetShellVarContext all
-  
-  ; Check if running as administrator
   UserInfo::GetAccountType
   pop $0
   ${If} $0 != "admin"
     MessageBox MB_ICONSTOP "Administrator rights required!"
-    SetErrorLevel 740 ; ERROR_ELEVATION_REQUIRED
+    SetErrorLevel 740
     Quit
   ${EndIf}
 
@@ -88,22 +66,19 @@ Function .onInit
   ${EndIf}
 FunctionEnd
 
-; Service management functions
-Function StopExistingService
-  DetailPrint "Checking for existing service..."
-  
-  ; Stop the service if it's running
-  nsExec::ExecToLog 'sc query "${SERVICE_NAME}"'
+Function RemoveLegacyService
+  DetailPrint "Removing leftover Windows service from older builds if present..."
+  nsExec::ExecToLog 'sc query "${LEGACY_SERVICE_NAME}"'
   Pop $0
   ${If} $0 == 0
-    DetailPrint "Stopping existing service..."
-    nsExec::ExecToLog 'sc stop "${SERVICE_NAME}"'
-    Sleep 3000 ; Wait 3 seconds for service to stop
+    nsExec::ExecToLog 'sc stop "${LEGACY_SERVICE_NAME}"'
+    Sleep 2000
   ${EndIf}
+  nsExec::ExecToLog 'sc delete "${LEGACY_SERVICE_NAME}"'
 FunctionEnd
 
-Function KillExistingClientProcess
-  DetailPrint "Checking for existing app processes..."
+Function KillExistingApp
+  DetailPrint "Stopping running EVO-X2 Control processes..."
   nsExec::ExecToLog 'taskkill /F /IM evox2-control.exe'
   nsExec::ExecToLog 'taskkill /F /IM evox2ctl.exe'
   nsExec::ExecToLog 'taskkill /F /IM ec-su_axb35-win-client.exe'
@@ -111,38 +86,22 @@ Function KillExistingClientProcess
   Sleep 1000
 FunctionEnd
 
-Function RemoveExistingService
-  DetailPrint "Removing leftover background service if present..."
-  nsExec::ExecToLog 'sc stop "${SERVICE_NAME}"'
-  Sleep 2000
-  nsExec::ExecToLog 'sc delete "${SERVICE_NAME}"'
-FunctionEnd
-
-
 Section "MainSection" SEC01
-  ; Stop existing service if running
-  Call StopExistingService
-  
-  ; Kill existing client process if running
-  Call KillExistingClientProcess
-  
-  ; Create installation directory
+  Call RemoveLegacyService
+  Call KillExistingApp
+
   SetOutPath "$INSTDIR"
   SetOverwrite ifnewer
-  
-  DetailPrint "Installing EVO-X2 Control..."
+  DetailPrint "Installing EVO-X2 Control (single-process GUI)..."
   File "target\release\evox2-control.exe"
   File "/oname=evox2ctl.exe" "target\release\evox2-control.exe"
-  
-  ; Create scripts directory and install scripts
+  File "LICENSE"
+
   DetailPrint "Installing scripts..."
   CreateDirectory "$APPDATA\ec-su_axb35-win\scripts"
   SetOutPath "$APPDATA\ec-su_axb35-win\scripts"
   File "server\scripts\info.ps1"
   File "server\scripts\test_fan_mode_fixed.ps1"
-  
-  DetailPrint "This build is a single GUI app. No background service is installed."
-  Call RemoveExistingService
 SectionEnd
 
 Section -AdditionalIcons
@@ -160,7 +119,7 @@ SectionEnd
 Section -Post
   WriteUninstaller "$INSTDIR\uninst.exe"
   WriteRegStr HKLM "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\evox2-control.exe"
-  WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "$(^Name)"
+  WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "${PRODUCT_DISPLAY_NAME}"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninst.exe"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\evox2-control.exe"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
@@ -174,52 +133,43 @@ Function un.onUninstSuccess
 FunctionEnd
 
 Function un.onInit
-  ; This is important to have $APPDATA variable
-  ; point to ProgramData folder instead of current user's Roaming folder
   SetShellVarContext all
-  
-  ; Check if running as administrator
   UserInfo::GetAccountType
   pop $0
   ${If} $0 != "admin"
     MessageBox MB_ICONSTOP "Administrator rights required!"
-    SetErrorLevel 740 ; ERROR_ELEVATION_REQUIRED
+    SetErrorLevel 740
     Quit
   ${EndIf}
-  
   MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON2 "Are you sure you want to completely remove $(^Name) and all of its components?" IDYES +2
   Abort
 FunctionEnd
 
 Section Uninstall
-  ; Stop and remove service
-  DetailPrint "Stopping and removing service..."
-  nsExec::ExecToLog 'sc stop "${SERVICE_NAME}"'
-  Sleep 3000
-  nsExec::ExecToLog 'sc delete "${SERVICE_NAME}"'
+  DetailPrint "Removing leftover Windows service from older builds if present..."
+  nsExec::ExecToLog 'sc stop "${LEGACY_SERVICE_NAME}"'
+  Sleep 2000
+  nsExec::ExecToLog 'sc delete "${LEGACY_SERVICE_NAME}"'
   Sleep 1000
-  
+
   nsExec::ExecToLog 'taskkill /F /IM evox2-control.exe'
   nsExec::ExecToLog 'taskkill /F /IM evox2ctl.exe'
   nsExec::ExecToLog 'taskkill /F /IM ec-su_axb35-win-client.exe'
   Sleep 1000
-  
-  ; Remove files
+
   Delete "$INSTDIR\${PRODUCT_NAME}.url"
   Delete "$INSTDIR\uninst.exe"
+  Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\ec-su_axb35-server.exe"
   Delete "$INSTDIR\evox2-control.exe"
   Delete "$INSTDIR\evox2ctl.exe"
   Delete "$INSTDIR\ec-su_axb35-win-client.exe"
-  
-  ; Remove scripts files
+
   Delete "$APPDATA\ec-su_axb35-win\scripts\info.ps1"
   Delete "$APPDATA\ec-su_axb35-win\scripts\test_fan_mode_fixed.ps1"
   RMDir "$APPDATA\ec-su_axb35-win\scripts"
-  
   RMDir "$APPDATA\ec-su_axb35-win"
-  
-  ; Remove shortcuts
+
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\EVO-X2 Control.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\EC SU_AXB35 Client.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\Quiet.lnk"
@@ -228,11 +178,9 @@ Section Uninstall
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}\Website.lnk"
   RMDir "$SMPROGRAMS\${PRODUCT_NAME}"
-  
-  ; Remove installation directory
+
   RMDir "$INSTDIR"
-  
-  ; Remove registry keys
+
   DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
   DeleteRegKey HKLM "${PRODUCT_DIR_REGKEY}"
   SetAutoClose true

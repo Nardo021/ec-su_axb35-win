@@ -1,3 +1,4 @@
+use std::env;
 use std::path::Path;
 
 fn main() {
@@ -17,27 +18,30 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=vendor/pawnio/LpcACPIEC.bin");
     println!("cargo:rerun-if-changed=assets/ec-su_axb35-win.ico");
+    println!("cargo:rerun-if-changed=assets/app.manifest");
 
     #[cfg(windows)]
     {
+        let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
         let mut res = winres::WindowsResource::new();
         res.set_icon("assets/ec-su_axb35-win.ico");
-        if std::env::var("PROFILE").unwrap_or_default() == "release" {
-            res.set_manifest(
-                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
-    <security>
-      <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
-      </requestedPrivileges>
-    </security>
-  </trustInfo>
-</assembly>
-"#,
-            );
-        }
+        res.set("ProductName", "EVO-X2 Control");
+        res.set("FileDescription", "EVO-X2 / SU_AXB35 EC control");
+        res.set("CompanyName", "Nardo021");
+        res.set("LegalCopyright", "Copyright (c) deseven, Nardo021");
+        res.set("FileVersion", &version);
+        res.set("ProductVersion", &version);
         res.compile().expect("embed Windows resources");
+
+        let manifest =
+            Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/app.manifest");
+        // Embed UAC + DPI for the app/CLI only. Test binaries stay unelevated.
+        println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
+            manifest.display()
+        );
+        println!("cargo:rustc-link-arg-bins=/MANIFESTUAC:NO");
         println!("cargo:rustc-link-arg=/DEBUG:NONE");
     }
 }

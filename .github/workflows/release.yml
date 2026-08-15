@@ -45,15 +45,66 @@ jobs:
             -DestinationPath "dist\evox2-control-$tag.zip" `
             -Force
 
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+        continue-on-error: true
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            Write-Host "NSIS is not available; skipping installer."
+            exit 0
+          }
+          & $makensis installer.nsi
+          if ($LASTEXITCODE -ne 0) {
+            throw "makensis failed with exit code $LASTEXITCODE"
+          }
+          Copy-Item "ec-su_axb35-win-installer-*.exe" dist\ -Force
+
+      - name: Optional code signing
+        env:
+          SIGNING_PFX: ${{ secrets.SIGNING_PFX }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        shell: pwsh
+        run: |
+          $files = @(
+            "dist\evox2-control.exe",
+            "dist\evox2ctl.exe"
+          )
+          $installer = Get-ChildItem dist -Filter "ec-su_axb35-win-installer-*.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($installer) {
+            $files += $installer.FullName
+          }
+          ./scripts/sign.ps1 -Path $files
+          Compress-Archive `
+            -Path dist\evox2-control.exe, dist\evox2ctl.exe `
+            -DestinationPath "dist\evox2-control-${{ github.ref_name }}.zip" `
+            -Force
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          gh release create $tag `
-            dist\evox2-control.exe `
-            dist\evox2ctl.exe `
-            "dist\evox2-control-$tag.zip" `
-            --title "EVO-X2 Control $tag" `
-            --generate-notes
+          $assets = @(
+            "dist\evox2-control.exe",
+            "dist\evox2ctl.exe",
+            "dist\evox2-control-$tag.zip"
+          )
+          $installer = Get-ChildItem dist -Filter "ec-su_axb35-win-installer-*.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($installer) {
+            $assets += $installer.FullName
+          }
+          $existing = gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0 -and $existing) {
+            gh release upload $tag @assets --clobber
+          } else {
+            gh release create $tag @assets `
+              --title "EVO-X2 Control $tag" `
+              --generate-notes
+          }

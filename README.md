@@ -29,8 +29,11 @@ secure configuration.
 
 1. Install the official PawnIO release from https://pawnio.eu/.
 2. Download the latest [GitHub Release](https://github.com/Nardo021/ec-su_axb35-win/releases),
-   run `ec-su_axb35-win-installer-2.1.0.exe` as Administrator, or copy the
-   binaries from `dist/`.
+   run `ec-su_axb35-win-installer-2.2.0.exe` as Administrator, or copy the
+   binaries from `dist/`. Windows may show a SmartScreen warning until the
+   binaries are Authenticode-signed; this project does not ship a self-signed
+   certificate. The GUI and `evox2ctl` both request Administrator rights
+   (UAC) because EC access through PawnIO requires elevation.
 3. Double-click `evox2-control.exe`. That is the only program you need.
 4. Closing the window hides it to the tray by default. Curve monitoring keeps
    running. Use the tray menu or Settings to quit. Power mode and fan settings
@@ -83,8 +86,9 @@ Power Mode
 [ Quiet ] [ Balanced ] [ Performance ]
 ```
 
-Fan blocks still support auto / fixed / curve, RPM, and temperature charts.
-Curve mode uses the same temperature as the APU block.
+Fan blocks are labeled CPU, secondary CPU/APU, and system. They still
+support auto / fixed / curve, RPM, and temperature charts. Curve mode uses
+the same temperature as the APU block.
 
 ### Temperature
 
@@ -115,10 +119,20 @@ control returns to APU and fan controls.
 - Start with Windows: off by default; creates an on-logon Task Scheduler
   entry named `EVO-X2 Control` with highest privileges (required for PawnIO)
 - Language: 中文 (default) or English
+- Temperature alert: tray balloon when the APU temperature stays at or above
+  the threshold (default 90°C, range 70–97). Alerts wait at least 10 minutes
+  between notifications
+- Export / import configuration (native file dialog). Import validates fan
+  mode, level, and 5-point curves, then restores onto the EC. A bad file is
+  rejected and does not write hardware
+- Open log / log folder, About, and Diagnostics. About is read-only.
+  Diagnostics can copy its report and open the log
 
 There is no Windows service and no REST API.
 
 ## CLI usage
+
+`evox2ctl` is the same elevated binary. UAC still applies.
 
 ```powershell
 evox2ctl mode
@@ -128,6 +142,40 @@ evox2ctl mode performance
 evox2ctl mode performance --dry-run
 evox2ctl status
 evox2ctl diagnose
+evox2ctl fan
+evox2ctl fan 1
+evox2ctl fan cpu auto
+evox2ctl fan 1 fixed 3
+evox2ctl fan 3 curve 20,60,83,95,97 0,50,80,94,96
+evox2ctl fan 1 auto --dry-run
+evox2ctl --json status
+evox2ctl --json diagnose
+```
+
+Fan identity: `1` / `cpu`, `2` / `secondary`, `3` / `system`.
+
+With `--json`, successful `status`, `diagnose`, `mode`, and `fan` output is
+JSON on stdout. Errors with `--json` are JSON on stderr:
+`{"error":"...","code":N}`.
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success, including `--dry-run` |
+| 1 | Other runtime / EC error |
+| 2 | Usage / invalid arguments |
+| 3 | Not running as Administrator |
+| 4 | PawnIO unavailable |
+| 5 | Unsupported hardware (writes refused) |
+| 6 | EC firmware too low |
+
+```powershell
+evox2ctl --json status
+if ($LASTEXITCODE -ne 0) { throw "evox2ctl failed: $LASTEXITCODE" }
+$status = evox2ctl --json status | ConvertFrom-Json
+$status.temperature
+evox2ctl --json fan cpu | ConvertFrom-Json | Select-Object id, mode, rpm
 ```
 
 Shortcuts can point at:
@@ -175,11 +223,15 @@ Configuration: `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`
   "log_path": "C:\\ProgramData\\ec-su_axb35-win\\server.log",
   "close_to_tray": true,
   "start_with_windows": false,
-  "language": "zh"
+  "language": "zh",
+  "temp_alert_enabled": true,
+  "temp_alert_celsius": 90
 }
 ```
 
 `host` and `port` may remain in the file from older builds. They are not used.
+Import/export copies power mode, fans, tray, autostart, language, and alert
+settings only. The log is appended and rotated to `server.log.1` around 2 MB.
 
 ## Security
 
@@ -195,12 +247,14 @@ Actions builds the Windows binaries and publishes a Release:
 
 ```powershell
 # bump version in server/Cargo.toml first, then:
-git tag v2.1.0
-git push origin v2.1.0
+git tag v2.2.0
+git push origin v2.2.0
 ```
 
-The tag must look like `v2.1.0` and match Cargo. The Release includes
-`evox2-control.exe`, `evox2ctl.exe`, and a zip of both. PawnIO is not bundled.
+The tag must look like `v2.2.0` and match Cargo. The Release includes
+`evox2-control.exe`, `evox2ctl.exe`, a zip of both, and the NSIS installer
+when NSIS is available. Optional Authenticode signing runs only when
+`SIGNING_PFX` / `SIGNING_PASSWORD` secrets exist. PawnIO is not bundled.
 
 Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
@@ -215,11 +269,16 @@ cargo build --workspace --release
 Optional installer: compile `installer.nsi` with NSIS after the release
 binaries exist.
 
-CI runs `cargo fmt --check`, `clippy`, `test`, and a release build. Hardware
-tests are not run in CI.
+CI runs `cargo fmt --check`, `clippy -D warnings`, `test`, a release build,
+and `makensis installer.nsi`. Hardware tests are not run in CI.
+
+## License
+
+Application code is under [LICENSE](LICENSE) (deseven upstream and this fork).
+The bundled `LpcACPIEC` module is LGPL-2.1-or-later from PawnIO.Modules.
 
 ## Help
 
-Issues: https://github.com/deseven/ec-su_axb35-win/issues/new
+Issues: https://github.com/Nardo021/ec-su_axb35-win/issues/new
 
 Strix Halo HomeLab Discord: https://discord.gg/pnPRyucNrG

@@ -2,13 +2,21 @@ use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::ptr;
 
+use std::mem;
+
 use winapi::shared::minwindef::{DWORD, HKEY};
+use winapi::shared::windef::HWND;
 use winapi::shared::winerror::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+use winapi::um::commdlg::{
+    GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
+    OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+};
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::libloaderapi::GetModuleFileNameW;
 use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
 use winapi::um::securitybaseapi::GetTokenInformation;
+use winapi::um::shellapi::ShellExecuteW;
 use winapi::um::synchapi::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use winapi::um::winbase::WAIT_OBJECT_0;
 use winapi::um::winnt::{
@@ -19,6 +27,7 @@ use winapi::um::winreg::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER,
     HKEY_LOCAL_MACHINE,
 };
+use winapi::um::winuser::SW_SHOWNORMAL;
 
 use crate::hardware::read_reg_string;
 
@@ -425,6 +434,78 @@ fn run_schtasks(args: &[String]) -> Result<SchtasksOutput, String> {
 fn schtasks_exe() -> String {
     let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
     format!(r"{windir}\System32\schtasks.exe")
+}
+
+pub fn shell_open(path: &str) {
+    let operation = wide("open");
+    let path_w = wide(path);
+    unsafe {
+        ShellExecuteW(
+            ptr::null_mut(),
+            operation.as_ptr(),
+            path_w.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+pub fn pick_json_file(hwnd: isize, save: bool) -> Option<String> {
+    unsafe {
+        let mut file = [0u16; 1024];
+        if save {
+            copy_wide_buf(&mut file, "evox2-config.json");
+        }
+        let mut filter = json_file_filter();
+        let mut title = wide(if save {
+            "Export configuration"
+        } else {
+            "Import configuration"
+        });
+        let mut ofn: OPENFILENAMEW = mem::zeroed();
+        ofn.lStructSize = mem::size_of::<OPENFILENAMEW>() as u32;
+        ofn.hwndOwner = hwnd as HWND;
+        ofn.lpstrFilter = filter.as_mut_ptr();
+        ofn.nFilterIndex = 1;
+        ofn.lpstrFile = file.as_mut_ptr();
+        ofn.nMaxFile = file.len() as u32;
+        ofn.lpstrTitle = title.as_mut_ptr();
+        ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+        let ok = if save {
+            ofn.Flags |= OFN_OVERWRITEPROMPT;
+            GetSaveFileNameW(&mut ofn) != 0
+        } else {
+            ofn.Flags |= OFN_FILEMUSTEXIST;
+            GetOpenFileNameW(&mut ofn) != 0
+        };
+        if !ok {
+            return None;
+        }
+        let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+        if len == 0 {
+            None
+        } else {
+            Some(String::from_utf16_lossy(&file[..len]))
+        }
+    }
+}
+
+fn json_file_filter() -> Vec<u16> {
+    let mut out = Vec::new();
+    for part in ["JSON", "*.json", "All files", "*.*"] {
+        out.extend(part.encode_utf16());
+        out.push(0);
+    }
+    out.push(0);
+    out
+}
+
+fn copy_wide_buf(dest: &mut [u16], text: &str) {
+    let encoded: Vec<u16> = text.encode_utf16().collect();
+    let len = encoded.len().min(dest.len().saturating_sub(1));
+    dest[..len].copy_from_slice(&encoded[..len]);
+    dest[len] = 0;
 }
 
 fn wide(value: &str) -> Vec<u16> {

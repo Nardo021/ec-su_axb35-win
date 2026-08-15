@@ -1,16 +1,18 @@
 use chrono::Utc;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
+
+const LOG_ROTATE_BYTES: u64 = 2 * 1024 * 1024;
 
 pub struct Logger {
     file_writer: Option<BufWriter<File>>,
     service_mode: bool,
+    log_path: Option<String>,
 }
 
 impl Logger {
     pub fn new(log_path: &str, service_mode: bool) -> Result<Self, String> {
-        // Create directory if it doesn't exist
         if let Some(parent) = Path::new(log_path).parent() {
             if !parent.exists() {
                 std::fs::create_dir_all(parent)
@@ -18,19 +20,13 @@ impl Logger {
             }
         }
 
-        // Open log file (overwrite existing)
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(log_path)
-            .map_err(|e| format!("Failed to open log file {}: {}", log_path, e))?;
-
-        let file_writer = BufWriter::new(file);
+        rotate_if_needed(log_path)?;
+        let file = open_append(log_path)?;
 
         Ok(Logger {
-            file_writer: Some(file_writer),
+            file_writer: Some(BufWriter::new(file)),
             service_mode,
+            log_path: Some(log_path.to_string()),
         })
     }
 
@@ -38,6 +34,7 @@ impl Logger {
         Logger {
             file_writer: None,
             service_mode: true,
+            log_path: None,
         }
     }
 
@@ -45,12 +42,21 @@ impl Logger {
         let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
         let log_line = format!("[{}] {}: {}", timestamp, level, message);
 
-        // Write to stdout only if not in service mode
         if !self.service_mode {
             println!("{}", log_line);
         }
 
-        // Write to file
+        if let Some(path) = self.log_path.clone() {
+            if should_rotate(&path) {
+                if let Some(mut writer) = self.file_writer.take() {
+                    let _ = writer.flush();
+                }
+                if rotate_if_needed(&path).is_ok() {
+                    self.file_writer = open_append(&path).ok().map(BufWriter::new);
+                }
+            }
+        }
+
         if let Some(ref mut writer) = self.file_writer {
             if let Err(e) = writeln!(writer, "{}", log_line) {
                 eprintln!("Failed to write to log file: {}", e);
@@ -83,5 +89,40 @@ impl Drop for Logger {
         if let Some(ref mut writer) = self.file_writer {
             let _ = writer.flush();
         }
+    }
+}
+
+fn open_append(log_path: &str) -> Result<File, String> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| format!("Failed to open log file {}: {}", log_path, e))
+}
+
+fn should_rotate(log_path: &str) -> bool {
+    fs::metadata(log_path)
+        .map(|meta| meta.len() >= LOG_ROTATE_BYTES)
+        .unwrap_or(false)
+}
+
+fn rotate_if_needed(log_path: &str) -> Result<(), String> {
+    if !should_rotate(log_path) {
+        return Ok(());
+    }
+    let rotated = format!("{log_path}.1");
+    let _ = fs::remove_file(&rotated);
+    fs::rename(log_path, &rotated)
+        .map_err(|e| format!("Failed to rotate log file {}: {}", log_path, e))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotate_threshold_is_two_megabytes() {
+        assert_eq!(LOG_ROTATE_BYTES, 2 * 1024 * 1024);
     }
 }

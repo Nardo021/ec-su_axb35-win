@@ -17,8 +17,35 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace
       - name: Release build
         run: cargo build --workspace --release
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            throw "makensis.exe was not found after installing NSIS"
+          }
+          & $makensis installer.nsi
+          if ($LASTEXITCODE -ne 0) {
+            throw "makensis failed with exit code $LASTEXITCODE"
+          }
+      - name: Optional code signing
+        env:
+          SIGNING_PFX: ${{ secrets.SIGNING_PFX }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Filter "ec-su_axb35-win-installer-*.exe" | Select-Object -First 1
+          $files = @(
+            "target\release\evox2-control.exe"
+          )
+          if ($installer) {
+            $files += $installer.FullName
+          }
+          ./scripts/sign.ps1 -Path $files

@@ -366,7 +366,7 @@ impl AppSession {
         Ok(())
     }
 
-    fn restore_saved_state(&self) {
+    pub fn restore_saved_state(&self) {
         self.logger
             .lock()
             .unwrap()

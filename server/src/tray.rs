@@ -12,8 +12,9 @@ use winapi::shared::windef::{HICON, HMENU, HWND, POINT};
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::processthreadsapi::{GetCurrentProcessId, GetCurrentThreadId};
 use winapi::um::shellapi::{
-    ExtractIconW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD,
-    NIM_DELETE, NIM_SETVERSION, NIN_KEYSELECT, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+    ExtractIconW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP,
+    NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_KEYSELECT, NIN_SELECT,
+    NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
 };
 use winapi::um::winuser::{
     AppendMenuW, AttachThreadInput, BringWindowToTop, CreatePopupMenu, CreateWindowExW,
@@ -121,6 +122,29 @@ pub fn shutdown() {
         unsafe {
             DestroyWindow(hwnd);
         }
+    }
+}
+
+pub fn show_balloon(title: &str, text: &str) {
+    let Some(state) = NOTIFY
+        .get()
+        .and_then(|notify| notify.lock().ok())
+        .and_then(|guard| {
+            guard.as_ref().map(|state| NotifyState {
+                hwnd: state.hwnd,
+                icon: state.icon,
+            })
+        })
+    else {
+        return;
+    };
+    unsafe {
+        let mut nid = notify_data(state.hwnd as HWND, state.icon as HICON);
+        nid.uFlags |= NIF_INFO;
+        copy_wide(&mut nid.szInfoTitle, title);
+        copy_wide(&mut nid.szInfo, text);
+        nid.dwInfoFlags = NIIF_INFO;
+        Shell_NotifyIconW(NIM_MODIFY, &mut nid);
     }
 }
 

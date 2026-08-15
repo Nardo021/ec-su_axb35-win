@@ -5,6 +5,31 @@ All notable changes to EVO-X2 Control are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-08-15
+
+Daily-use, installer, and CLI completeness on top of 2.1.0. Still no network
+API and no Windows service.
+
+### Added
+
+- About and Diagnostics pages (copy report, open log / log folder).
+- Temperature tray balloon when the APU stays at or above a configurable
+  threshold (default 90°C, 10 minute cooldown).
+- Native configuration import/export with validation before any EC write.
+- `evox2ctl fan` with cpu/secondary/system aliases, `--json`, and stable
+  exit codes (0/1/2/3/4/5/6).
+- LICENSE, installer license page (English + Simplified Chinese), optional
+  Authenticode signing script, and NSIS installer in CI/release.
+
+### Changed
+
+- Fan cards use CPU / secondary CPU-APU / system names.
+- Logs append and rotate to `server.log.1` around 2 MB.
+- Debug and release app binaries request Administrator; DPI awareness is
+  embedded. Publisher and project links point at this fork.
+- Installer no longer treats a Windows service as the product; leftover
+  `ec-su_axb35-win` services are still removed on upgrade/uninstall.
+
 ## [2.1.0] - 2026-08-15
 
 Windows desktop release after 2.0.0. User-visible UI and autostart behavior
@@ -39,5 +64,6 @@ changed enough to warrant a minor bump rather than 2.0.1.
 First PawnIO release: one window plus tray, no Windows service, Secure Boot
 can stay enabled. See the GitHub Release for that tag.
 
+[2.2.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/Nardo021/ec-su_axb35-win/releases/tag/v2.0.0

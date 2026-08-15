@@ -13,8 +13,12 @@ use eframe::egui::{
 use image::GenericImageView;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+use crate::alert::{should_fire_temp_alert, TEMP_ALERT_MAX, TEMP_ALERT_MIN};
+use crate::config::{program_data_dir, PortableConfig};
+use crate::diagnose::{DiagnoseReport, REPO_URL};
+use crate::fan;
 use crate::i18n::{t, Language};
-use crate::platform::{set_start_with_windows, ui_chrome, UiChrome};
+use crate::platform::{pick_json_file, set_start_with_windows, shell_open, ui_chrome, UiChrome};
 use crate::session::{AppSession, FanSnapshot, MetricsSnapshot};
 use crate::tray::TrayEvent;
 
@@ -32,6 +36,35 @@ const ICON_BACK: &str = "\u{E72B}";
 enum Page {
     Home,
     Settings,
+    About,
+    Diagnostics,
+}
+
+#[derive(Clone)]
+struct Nav {
+    page: Page,
+    stack: Vec<Page>,
+}
+
+impl Nav {
+    fn home() -> Self {
+        Self {
+            page: Page::Home,
+            stack: Vec::new(),
+        }
+    }
+
+    fn go(&mut self, dest: Page) {
+        if dest == self.page {
+            return;
+        }
+        self.stack.push(self.page);
+        self.page = dest;
+    }
+
+    fn back(&mut self) {
+        self.page = self.stack.pop().unwrap_or(Page::Home);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +212,7 @@ struct UiState {
     error_at: Option<Instant>,
     edit: EditState,
     charts: ChartData,
+    diagnose: Option<DiagnoseReport>,
 }
 
 struct ControlApp {
@@ -187,7 +221,8 @@ struct ControlApp {
     window_configured: bool,
     last_chrome: Option<UiChrome>,
     tray_rx: Receiver<TrayEvent>,
-    page: Page,
+    nav: Nav,
+    last_temp_alert: Option<Instant>,
 }
 
 pub fn run(session: Arc<AppSession>, tray_rx: Receiver<TrayEvent>) -> Result<(), String> {
@@ -200,6 +235,7 @@ pub fn run(session: Arc<AppSession>, tray_rx: Receiver<TrayEvent>) -> Result<(),
         error_at: None,
         edit: EditState::default(),
         charts: ChartData::new(),
+        diagnose: None,
     }));
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -242,7 +278,8 @@ pub fn run(session: Arc<AppSession>, tray_rx: Receiver<TrayEvent>) -> Result<(),
         window_configured: false,
         last_chrome: None,
         tray_rx,
-        page: Page::Home,
+        nav: Nav::home(),
+        last_temp_alert: None,
     };
     let title = t(session.config.lock().unwrap().language(), "app_title");
 
@@ -520,12 +557,15 @@ impl eframe::App for ControlApp {
             }
         }
 
-        if self.page == Page::Settings && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.page = Page::Home;
+        maybe_temp_alert(self);
+
+        if self.nav.page != Page::Home && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.nav.back();
         }
 
         let shared = Arc::clone(&self.state);
-        let mut next_page = self.page;
+        let hwnd = hwnd_from_handle(&frame.window_handle());
+        let mut nav = self.nav.clone();
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -540,12 +580,17 @@ impl eframe::App for ControlApp {
                         state.error_at = None;
                     }
                 }
+                if nav.page != Page::Diagnostics {
+                    state.diagnose = None;
+                }
 
                 let lang = state.session.config.lock().unwrap().language();
-                let page = next_page;
+                let page = nav.page;
                 let scroll_id = match page {
                     Page::Home => "home-scroll",
                     Page::Settings => "settings-scroll",
+                    Page::About => "about-scroll",
+                    Page::Diagnostics => "diagnostics-scroll",
                 };
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -554,7 +599,7 @@ impl eframe::App for ControlApp {
                         ui.set_width(ui.available_width());
                         match page {
                             Page::Home => {
-                                draw_header(ui, lang, &theme, &state, &mut next_page);
+                                draw_header(ui, lang, &theme, &state, &mut nav);
                                 draw_error(ui, lang, &theme, &state);
                                 ui.add_space(10.0);
                                 if let Some(metrics) = state.metrics.clone() {
@@ -570,15 +615,29 @@ impl eframe::App for ControlApp {
                                 }
                             }
                             Page::Settings => {
-                                draw_settings_header(ui, lang, &theme, &mut next_page);
+                                draw_page_header(ui, lang, &theme, &mut nav, "settings");
                                 draw_error(ui, lang, &theme, &state);
                                 ui.add_space(10.0);
-                                draw_settings(ui, lang, &theme, ctx, &mut state);
+                                draw_settings(
+                                    ui, lang, &theme, ctx, &mut state, &shared, &mut nav, hwnd,
+                                );
+                            }
+                            Page::About => {
+                                draw_page_header(ui, lang, &theme, &mut nav, "about");
+                                draw_error(ui, lang, &theme, &state);
+                                ui.add_space(10.0);
+                                draw_about(ui, lang, &theme, &state, &mut nav);
+                            }
+                            Page::Diagnostics => {
+                                draw_page_header(ui, lang, &theme, &mut nav, "diagnostics");
+                                draw_error(ui, lang, &theme, &state);
+                                ui.add_space(10.0);
+                                draw_diagnostics(ui, lang, &theme, ctx, &mut state);
                             }
                         }
                     });
             });
-        self.page = next_page;
+        self.nav = nav;
 
         configure_window(self, ctx);
         ctx.request_repaint_after(Duration::from_millis(200));
@@ -620,7 +679,7 @@ fn draw_error(ui: &mut egui::Ui, lang: Language, theme: &Theme, state: &UiState)
     }
 }
 
-fn draw_header(ui: &mut egui::Ui, lang: Language, theme: &Theme, state: &UiState, page: &mut Page) {
+fn draw_header(ui: &mut egui::Ui, lang: Language, theme: &Theme, state: &UiState, nav: &mut Nav) {
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(t(lang, "app_title"))
@@ -630,7 +689,7 @@ fn draw_header(ui: &mut egui::Ui, lang: Language, theme: &Theme, state: &UiState
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if nav_icon(ui, theme, ICON_SETTING, t(lang, "settings")) {
-                *page = Page::Settings;
+                nav.go(Page::Settings);
             }
         });
     });
@@ -648,13 +707,19 @@ fn draw_header(ui: &mut egui::Ui, lang: Language, theme: &Theme, state: &UiState
     ui.add(egui::Label::new(RichText::new(caption).small().color(theme.muted)).wrap());
 }
 
-fn draw_settings_header(ui: &mut egui::Ui, lang: Language, theme: &Theme, page: &mut Page) {
+fn draw_page_header(
+    ui: &mut egui::Ui,
+    lang: Language,
+    theme: &Theme,
+    nav: &mut Nav,
+    title_key: &str,
+) {
     ui.horizontal(|ui| {
         if nav_icon(ui, theme, ICON_BACK, t(lang, "back")) {
-            *page = Page::Home;
+            nav.back();
         }
         ui.label(
-            RichText::new(t(lang, "settings"))
+            RichText::new(t(lang, title_key))
                 .size(16.0)
                 .strong()
                 .color(theme.text),
@@ -741,14 +806,7 @@ fn draw_fan(
     state: &mut UiState,
     shared: &Arc<Mutex<UiState>>,
 ) {
-    let name = t(
-        lang,
-        match index {
-            0 => "fan1",
-            1 => "fan2",
-            _ => "fan3",
-        },
-    );
+    let name = t(lang, fan::title_key((index + 1) as u8));
     let fan = &metrics.fans[index];
     let history = state.charts.fans[index].clone();
     let max_rpm = if index == 2 { 2500 } else { 5000 };
@@ -876,21 +934,29 @@ fn draw_fan(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_settings(
     ui: &mut egui::Ui,
     lang: Language,
     theme: &Theme,
     ctx: &egui::Context,
     state: &mut UiState,
+    shared: &Arc<Mutex<UiState>>,
+    nav: &mut Nav,
+    hwnd: isize,
 ) {
     let mut close_to_tray;
     let mut start_with_windows;
     let mut language;
+    let mut temp_alert_enabled;
+    let mut temp_alert_celsius;
     {
         let config = state.session.config.lock().unwrap();
         close_to_tray = config.close_to_tray;
         start_with_windows = config.start_with_windows;
         language = config.language.clone();
+        temp_alert_enabled = config.temp_alert_enabled;
+        temp_alert_celsius = i32::from(config.temp_alert_celsius);
     }
 
     card(theme).show(ui, |ui| {
@@ -946,6 +1012,165 @@ fn draw_settings(
                 }
             });
         });
+        hairline(ui, theme);
+        settings_row(ui, |ui| {
+            ui.label(RichText::new(t(lang, "temp_alert")).color(theme.text));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if toggle_switch(ui, theme, &mut temp_alert_enabled).changed() {
+                    persist_alert(state, temp_alert_enabled, temp_alert_celsius as u8);
+                }
+            });
+        });
+        if temp_alert_enabled {
+            hairline(ui, theme);
+            ui.label(RichText::new(t(lang, "temp_alert_threshold")).color(theme.muted));
+            if ui
+                .add(egui::Slider::new(
+                    &mut temp_alert_celsius,
+                    i32::from(TEMP_ALERT_MIN)..=i32::from(TEMP_ALERT_MAX),
+                ))
+                .changed()
+            {
+                persist_alert(state, temp_alert_enabled, temp_alert_celsius as u8);
+            }
+        }
+    });
+
+    ui.add_space(10.0);
+    card(theme).show(ui, |ui| {
+        settings_row(ui, |ui| {
+            if ui.button(t(lang, "export_config")).clicked() {
+                export_config(state, hwnd);
+            }
+            if ui.button(t(lang, "import_config")).clicked() {
+                import_config(state, shared, hwnd);
+            }
+        });
+        hairline(ui, theme);
+        settings_row(ui, |ui| {
+            if ui.button(t(lang, "open_log")).clicked() {
+                let path = state.session.config.lock().unwrap().log_path.clone();
+                shell_open(&path);
+            }
+            if ui.button(t(lang, "open_log_dir")).clicked() {
+                shell_open(&program_data_dir());
+            }
+        });
+        hairline(ui, theme);
+        settings_row(ui, |ui| {
+            if ui.button(t(lang, "about")).clicked() {
+                nav.go(Page::About);
+            }
+            if ui.button(t(lang, "diagnostics")).clicked() {
+                nav.go(Page::Diagnostics);
+            }
+        });
+    });
+}
+
+fn draw_about(ui: &mut egui::Ui, lang: Language, theme: &Theme, state: &UiState, nav: &mut Nav) {
+    card(theme).show(ui, |ui| {
+        ui.label(
+            RichText::new(t(lang, "app_name"))
+                .size(16.0)
+                .strong()
+                .color(theme.text),
+        );
+        ui.label(
+            RichText::new(format!(
+                "{} {}",
+                t(lang, "version"),
+                env!("CARGO_PKG_VERSION")
+            ))
+            .color(theme.muted),
+        );
+        ui.add_space(8.0);
+        kv_line(
+            ui,
+            theme,
+            t(lang, "motherboard"),
+            &state.session.runtime.hardware,
+        );
+        kv_line(
+            ui,
+            theme,
+            t(lang, "firmware_status"),
+            state.firmware.as_deref().unwrap_or(t(lang, "unknown")),
+        );
+        kv_line(
+            ui,
+            theme,
+            t(lang, "pawnio_status"),
+            &state.session.runtime.pawnio,
+        );
+        kv_line(
+            ui,
+            theme,
+            t(lang, "lpcacpiec_status"),
+            &state.session.runtime.lpcacpiec,
+        );
+        kv_line(
+            ui,
+            theme,
+            t(lang, "secure_boot_status"),
+            &state.session.runtime.secure_boot,
+        );
+        ui.add_space(8.0);
+        ui.hyperlink_to(REPO_URL, REPO_URL);
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(t(lang, "pawnio_lgpl_note"))
+                .small()
+                .color(theme.muted),
+        );
+        ui.add_space(8.0);
+        if ui.button(t(lang, "diagnostics")).clicked() {
+            nav.go(Page::Diagnostics);
+        }
+    });
+}
+
+fn draw_diagnostics(
+    ui: &mut egui::Ui,
+    lang: Language,
+    theme: &Theme,
+    ctx: &egui::Context,
+    state: &mut UiState,
+) {
+    if state.diagnose.is_none() {
+        state.diagnose = Some(DiagnoseReport::collect(Some(&state.session)));
+    }
+    let text = state
+        .diagnose
+        .as_ref()
+        .map(|report| report.format_text(lang))
+        .unwrap_or_default();
+    card(theme).show(ui, |ui| {
+        ui.label(
+            RichText::new(&text)
+                .color(theme.text)
+                .family(FontFamily::Monospace),
+        );
+        ui.add_space(8.0);
+        settings_row(ui, |ui| {
+            if ui.button(t(lang, "copy_diagnostics")).clicked() {
+                ctx.copy_text(text.clone());
+            }
+            if ui.button(t(lang, "open_log")).clicked() {
+                let path = state.session.config.lock().unwrap().log_path.clone();
+                shell_open(&path);
+            }
+            if ui.button(t(lang, "open_log_dir")).clicked() {
+                shell_open(&program_data_dir());
+            }
+        });
+    });
+}
+
+fn kv_line(ui: &mut egui::Ui, theme: &Theme, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(theme.muted));
+        ui.label(RichText::new(value).color(theme.text));
     });
 }
 
@@ -979,6 +1204,102 @@ fn persist_settings(
             state.error = Some(error);
             state.error_at = Some(Instant::now());
         }
+    }
+}
+
+fn persist_alert(state: &mut UiState, enabled: bool, celsius: u8) {
+    let result = {
+        let mut config = state.session.config.lock().unwrap();
+        config.temp_alert_enabled = enabled;
+        config.temp_alert_celsius = crate::alert::clamp_threshold(celsius);
+        config.save()
+    };
+    if let Err(error) = result {
+        state.error = Some(error);
+        state.error_at = Some(Instant::now());
+    }
+}
+
+fn export_config(state: &mut UiState, hwnd: isize) {
+    let Some(path) = pick_json_file(hwnd, true) else {
+        return;
+    };
+    let portable = state.session.config.lock().unwrap().to_portable();
+    match serde_json::to_string_pretty(&portable) {
+        Ok(json) => {
+            if let Err(error) = std::fs::write(&path, json) {
+                state.error = Some(error.to_string());
+                state.error_at = Some(Instant::now());
+            }
+        }
+        Err(error) => {
+            state.error = Some(error.to_string());
+            state.error_at = Some(Instant::now());
+        }
+    }
+}
+
+fn import_config(state: &mut UiState, shared: &Arc<Mutex<UiState>>, hwnd: isize) {
+    let Some(path) = pick_json_file(hwnd, false) else {
+        return;
+    };
+    let json = match std::fs::read_to_string(&path) {
+        Ok(json) => json,
+        Err(error) => {
+            state.error = Some(error.to_string());
+            state.error_at = Some(Instant::now());
+            return;
+        }
+    };
+    let portable = match PortableConfig::parse_json(&json) {
+        Ok(portable) => portable,
+        Err(error) => {
+            state.error = Some(error);
+            state.error_at = Some(Instant::now());
+            return;
+        }
+    };
+    let start_with_windows = portable.start_with_windows;
+    let result = {
+        let mut config = state.session.config.lock().unwrap();
+        config.apply_portable(portable);
+        config.save()
+    };
+    if let Err(error) = result {
+        state.error = Some(error);
+        state.error_at = Some(Instant::now());
+        return;
+    }
+    if let Err(error) = set_start_with_windows(start_with_windows) {
+        state.error = Some(error);
+        state.error_at = Some(Instant::now());
+        return;
+    }
+    state.session.restore_saved_state();
+    refresh_metrics(shared);
+}
+
+fn maybe_temp_alert(app: &mut ControlApp) {
+    let (enabled, threshold, temp, lang) = {
+        let state = app.state.lock().unwrap();
+        let config = state.session.config.lock().unwrap();
+        (
+            config.temp_alert_enabled,
+            config.temp_alert_celsius,
+            state.metrics.as_ref().map(|metrics| metrics.temperature),
+            config.language(),
+        )
+    };
+    let Some(temp) = temp else {
+        return;
+    };
+    let now = Instant::now();
+    if should_fire_temp_alert(enabled, threshold, temp, app.last_temp_alert, now) {
+        app.last_temp_alert = Some(now);
+        crate::tray::show_balloon(
+            t(lang, "app_title"),
+            &format!("{}{temp}\u{00B0}C", t(lang, "temp_alert_body")),
+        );
     }
 }
 
