@@ -97,7 +97,12 @@ fn cmd_status(language: Language) -> Result<(), String> {
         t(language, "power_mode_status"),
         t(language, &metrics.power_mode)
     );
-    println!("{} {} C", t(language, "apu_temp"), metrics.temperature);
+    println!(
+        "{} {} C ({})",
+        t(language, "apu_temp"),
+        metrics.temperature,
+        t(language, metrics.temperature_source.i18n_key())
+    );
     println!("{} {} RPM", t(language, "cpu_fan"), metrics.fans[0].rpm);
     println!(
         "{} {} RPM",
@@ -182,6 +187,16 @@ fn cmd_diagnose(language: Language) -> Result<(), String> {
         secure_boot_status()
     );
     if let Some(session) = session {
+        if let Ok(ec_temp) = session.controller.read_ec_apu_temperature() {
+            let (temp, source) = crate::thermal::resolve_with_source(ec_temp);
+            println!(
+                "{} {} C ({})",
+                t(language, "apu_temp"),
+                temp,
+                t(language, source.i18n_key())
+            );
+            println!("{} {} C", t(language, "ec_raw_temp"), ec_temp);
+        }
         if !session.runtime.hardware_supported {
             println!("{}", t(language, "hardware_unsupported"));
         }

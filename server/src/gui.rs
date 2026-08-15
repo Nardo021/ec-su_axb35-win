@@ -187,9 +187,50 @@ pub fn run(session: Arc<AppSession>, tray_rx: Receiver<TrayEvent>) -> Result<(),
                 .with_icon(icon.unwrap_or_default()),
             ..Default::default()
         },
-        Box::new(move |_cc| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            install_cjk_fonts(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
     .map_err(|error| format!("Failed to start GUI: {error}"))
+}
+
+fn install_cjk_fonts(ctx: &egui::Context) {
+    let Some(bytes) = load_cjk_font_bytes() else {
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "cjk".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+    );
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(0, "cjk".to_owned());
+    }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        family.push("cjk".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn load_cjk_font_bytes() -> Option<Vec<u8>> {
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let fonts = std::path::Path::new(&windir).join("Fonts");
+    for name in [
+        "msyh.ttc",
+        "msyh.ttf",
+        "msjh.ttc",
+        "simhei.ttf",
+        "Deng.ttf",
+        "simsun.ttc",
+    ] {
+        if let Ok(bytes) = std::fs::read(fonts.join(name)) {
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+    }
+    None
 }
 
 impl eframe::App for ControlApp {
@@ -334,6 +375,9 @@ fn draw_apu(
                     ui.colored_label(
                         temp_color(metrics.temperature),
                         format!("{}°C", metrics.temperature),
+                    );
+                    ui.label(
+                        egui::RichText::new(t(lang, metrics.temperature_source.i18n_key())).weak(),
                     );
                 });
                 ui.horizontal(|ui| {

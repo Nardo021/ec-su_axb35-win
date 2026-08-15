@@ -72,9 +72,10 @@ in-process. It does not need a separate server process.
 A second double-click focuses the existing window instead of opening another
 EC session.
 
-The APU block shows the current power mode and a selector:
+The APU block shows temperature, the current power mode, and a selector:
 
 ```text
+Temperature: 48°C  GPU driver (Task Manager)
 Current mode: Balanced
 
 Power Mode
@@ -82,6 +83,21 @@ Power Mode
 ```
 
 Fan blocks still support auto / fixed / curve, RPM, and temperature charts.
+Curve mode uses the same temperature as the APU block.
+
+### Temperature
+
+The APU temperature is **not** the EC `0x70` byte. On current EVO-X2 firmware
+that register can sit near 97°C while Task Manager shows a GPU temperature in
+the 40s. Display, charts, and fan curves use one source, in this order:
+
+1. AMD GPU driver via WDDM (the same sensor Task Manager uses)
+2. AMD ADL, if the driver exposes it
+3. EC register `0x70`, only if both driver paths fail
+
+The GUI labels the source next to the number. `evox2ctl status` prints it in
+parentheses. `evox2ctl diagnose` also prints the raw EC `0x70` value so the
+two sensors can be compared.
 
 ### Tray
 
@@ -119,8 +135,9 @@ evox2ctl.exe mode balanced
 evox2ctl.exe mode performance
 ```
 
-`diagnose` does not change hardware state. CLI text follows the `language`
-value in `config.json`.
+`status` includes the APU temperature and its source. `diagnose` does not
+change hardware state; it also prints the raw EC `0x70` temperature. CLI text
+follows the `language` value in `config.json`.
 
 ## Troubleshooting
 
@@ -131,6 +148,8 @@ value in `config.json`.
 | `Unsupported hardware` | Confirm the machine is AXB35 / EVO-X2 |
 | `EC timeout waiting for input buffer to clear` | Another EC client may be holding the ports |
 | GUI cannot start | Confirm PawnIO is installed, the app is elevated, and no leftover service is running |
+| APU temperature near 97°C while Task Manager GPU is ~45°C | Use a build that reads the GPU driver; `diagnose` should show the driver value and a separate EC `0x70` raw value |
+| Temperature source says `EC 0x70` | AMD driver temperature was unavailable; confirm the AMD GPU driver is installed |
 | Settings did not come back | `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json` |
 
 ## Architecture

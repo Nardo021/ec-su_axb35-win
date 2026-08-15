@@ -80,7 +80,6 @@ pub enum EcOperation {
     GetFirmwareVersion,
     GetApuPowerMode,
     SetApuPowerMode(String),
-    GetApuTemperature,
     GetFanRpm(u8),
     GetFanMode(u8),
     SetFanMode(u8, String),
@@ -96,7 +95,6 @@ pub enum EcOperation {
 pub enum EcResult {
     FirmwareVersion { major: u8, minor: u8 },
     ApuPowerMode(String),
-    ApuTemperature(u8),
     FanRpm(u16),
     FanMode(String),
     FanLevel(u8),
@@ -224,10 +222,6 @@ impl<B: EcIoBackend> EcController<B> {
                 self.write_byte(EC_REG_APU_POWER_MODE, parsed.to_ec_value())?;
                 Ok(EcResult::ApuPowerMode(parsed.as_str().to_string()))
             }
-            EcOperation::GetApuTemperature => {
-                let temp = self.read_byte(EC_REG_APU_TEMPERATURE)?;
-                Ok(EcResult::ApuTemperature(temp))
-            }
             EcOperation::GetFanRpm(fan_id) => {
                 let (high_reg, low_reg) = self.get_fan_speed_registers(fan_id)?;
                 let high = self.read_byte(high_reg)?;
@@ -288,7 +282,7 @@ impl<B: EcIoBackend> EcController<B> {
                 self.write_byte(mode_reg, mode_val)?;
 
                 if fan_mode == FanMode::Curve {
-                    if let Ok(temp) = self.read_byte(EC_REG_APU_TEMPERATURE) {
+                    if let Ok(temp) = self.read_control_temperature() {
                         let curves = self.fan_curves.lock().unwrap();
                         let fan_idx = (fan_id - 1) as usize;
                         let mut initial_level = 0;
@@ -432,7 +426,7 @@ impl<B: EcIoBackend> EcController<B> {
         }
 
         let mut log_messages = Vec::new();
-        let temp = self.read_byte(EC_REG_APU_TEMPERATURE)?;
+        let temp = self.read_control_temperature()?;
         let curves = self.fan_curves.lock().unwrap();
 
         for fan_id in 1..=3 {
@@ -468,6 +462,15 @@ impl<B: EcIoBackend> EcController<B> {
         }
 
         Ok(log_messages)
+    }
+
+    pub fn read_ec_apu_temperature(&self) -> Result<u8, String> {
+        self.read_byte(EC_REG_APU_TEMPERATURE)
+    }
+
+    fn read_control_temperature(&self) -> Result<u8, String> {
+        let ec = self.read_ec_apu_temperature()?;
+        Ok(crate::thermal::resolve_temperature(ec))
     }
 
     pub fn has_curve_fans(&self) -> bool {
