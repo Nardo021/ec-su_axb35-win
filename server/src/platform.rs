@@ -1,6 +1,7 @@
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::ptr;
+use std::sync::OnceLock;
 
 use std::mem;
 
@@ -18,12 +19,15 @@ use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
 use winapi::um::securitybaseapi::GetTokenInformation;
 use winapi::um::shellapi::ShellExecuteW;
 use winapi::um::stringapiset::MultiByteToWideChar;
-use winapi::um::synchapi::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
+use winapi::um::synchapi::{
+    CreateEventW, CreateMutexW, OpenEventW, OpenMutexW, ReleaseMutex, SetEvent, WaitForSingleObject,
+};
+use winapi::um::sysinfoapi::{ComputerNameDnsHostname, GetComputerNameExW};
 use winapi::um::winbase::WAIT_OBJECT_0;
 use winapi::um::winnls::GetACP;
 use winapi::um::winnt::{
-    HANDLE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, REG_SZ, TOKEN_ELEVATION,
-    TOKEN_QUERY,
+    HANDLE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, REG_SZ, SYNCHRONIZE,
+    TOKEN_ELEVATION, TOKEN_QUERY,
 };
 use winapi::um::winreg::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER,
@@ -36,12 +40,54 @@ use crate::hardware::read_reg_string;
 const WAIT_ABANDONED: DWORD = 0x00000080;
 const ACCESS_EC_TIMEOUT_MS: DWORD = 5_000;
 pub const ALREADY_RUNNING: &str = "ALREADY_RUNNING";
+const INSTANCE_MUTEX_NAME: &str = "Global\\EVOX2-Control";
+const RELOAD_FANS_EVENT_NAME: &str = "Global\\EVOX2-Control-ReloadFans";
+const EVENT_MODIFY_STATE: DWORD = 0x0002;
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "EVO-X2 Control";
 const STARTUP_TASK_NAME: &str = "EVO-X2 Control";
 const STARTUP_APPROVED_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+pub fn host_name() -> String {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(detect_host_name).clone()
+}
+
+fn detect_host_name() -> String {
+    dns_host_name()
+        .or_else(env_computer_name)
+        .unwrap_or_else(|| "Processor".to_string())
+}
+
+fn env_computer_name() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn dns_host_name() -> Option<String> {
+    unsafe {
+        let mut size = 0u32;
+        GetComputerNameExW(ComputerNameDnsHostname, ptr::null_mut(), &mut size);
+        if size == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u16; size as usize];
+        if GetComputerNameExW(ComputerNameDnsHostname, buffer.as_mut_ptr(), &mut size) == 0 {
+            return None;
+        }
+        let name = String::from_utf16_lossy(&buffer[..size as usize]);
+        let name = name.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+}
 
 pub fn is_admin() -> bool {
     unsafe {
@@ -168,7 +214,7 @@ pub struct InstanceGuard {
 
 impl InstanceGuard {
     pub fn acquire() -> Result<Self, String> {
-        let name: Vec<u16> = "Global\\EVOX2-Control"
+        let name: Vec<u16> = INSTANCE_MUTEX_NAME
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -197,6 +243,73 @@ impl Drop for InstanceGuard {
 }
 
 unsafe impl Send for InstanceGuard {}
+
+pub fn gui_instance_running() -> bool {
+    named_mutex_exists(INSTANCE_MUTEX_NAME)
+}
+
+fn named_mutex_exists(name: &str) -> bool {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe { OpenMutexW(SYNCHRONIZE, 0, wide.as_ptr()) };
+    if handle.is_null() {
+        return false;
+    }
+    unsafe {
+        CloseHandle(handle);
+    }
+    true
+}
+
+fn wide_name(name: &str) -> Vec<u16> {
+    name.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// GUI-owned event. CLI pulses it after writing fan curves to config.json.
+pub struct ReloadFansGuard {
+    handle: HANDLE,
+}
+
+impl ReloadFansGuard {
+    pub fn create() -> Result<Self, String> {
+        let name = wide_name(RELOAD_FANS_EVENT_NAME);
+        let handle = unsafe { CreateEventW(ptr::null_mut(), 0, 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(format!(
+                "Failed to create reload-fans event (Win32 {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        Ok(Self { handle })
+    }
+
+    pub fn poll(&self) -> bool {
+        unsafe { WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0 }
+    }
+}
+
+impl Drop for ReloadFansGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+unsafe impl Send for ReloadFansGuard {}
+unsafe impl Sync for ReloadFansGuard {}
+
+pub fn signal_reload_fans() -> bool {
+    let name = wide_name(RELOAD_FANS_EVENT_NAME);
+    let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+    if handle.is_null() {
+        return false;
+    }
+    let signaled = unsafe { SetEvent(handle) != 0 };
+    unsafe {
+        CloseHandle(handle);
+    }
+    signaled
+}
 unsafe impl Sync for InstanceGuard {}
 
 pub fn current_exe_path() -> Result<String, String> {
@@ -710,5 +823,33 @@ mod tests {
     fn accent_from_abgr_matches_windows_layout() {
         assert_eq!(accent_from_abgr(0xFF_D4_78_00), (0x00, 0x78, 0xD4));
         assert_eq!(accent_from_abgr(0x00_00_00_FF), (0xFF, 0x00, 0x00));
+    }
+
+    #[test]
+    fn host_name_is_nonempty_on_windows() {
+        let name = host_name();
+        assert!(!name.is_empty());
+        if let Some(computer) = env_computer_name() {
+            assert!(
+                name.eq_ignore_ascii_case(&computer)
+                    || name.contains(&computer)
+                    || computer.contains(&name),
+                "host_name {name:?} should relate to COMPUTERNAME {computer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_mutex_exists_tracks_create_and_close() {
+        let name = format!("Local\\EVOX2-Control-Test-{}", std::process::id());
+        assert!(!named_mutex_exists(&name));
+        let wide = wide_name(&name);
+        let handle = unsafe { CreateMutexW(ptr::null_mut(), 0, wide.as_ptr()) };
+        assert!(!handle.is_null());
+        assert!(named_mutex_exists(&name));
+        unsafe {
+            CloseHandle(handle);
+        }
+        assert!(!named_mutex_exists(&name));
     }
 }

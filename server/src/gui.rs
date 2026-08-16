@@ -14,11 +14,13 @@ use image::GenericImageView;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::alert::{should_fire_temp_alert, TEMP_ALERT_MAX, TEMP_ALERT_MIN};
-use crate::config::{program_data_dir, PortableConfig};
+use crate::config::{program_data_dir, PortableConfig, SMOOTHING_WINDOW_MAX, SMOOTHING_WINDOW_MIN};
 use crate::diagnose::{DiagnoseReport, AUTHOR, REPO_URL, UPSTREAM_URL};
 use crate::fan;
 use crate::i18n::{t, Language};
-use crate::platform::{pick_json_file, set_start_with_windows, shell_open, ui_chrome, UiChrome};
+use crate::platform::{
+    host_name, pick_json_file, set_start_with_windows, shell_open, ui_chrome, UiChrome,
+};
 use crate::session::{AppSession, FanSnapshot, MetricsSnapshot};
 use crate::thermal::TemperatureSource;
 use crate::tray::TrayEvent;
@@ -151,6 +153,8 @@ struct EditState {
     curve_dirty: [bool; 3],
     renaming_fan: [bool; 3],
     temp_fan_name: [String; 3],
+    renaming_processor: bool,
+    temp_processor_name: String,
 }
 
 impl Default for EditState {
@@ -173,6 +177,8 @@ impl Default for EditState {
             curve_dirty: [false; 3],
             renaming_fan: [false; 3],
             temp_fan_name: [String::new(), String::new(), String::new()],
+            renaming_processor: false,
+            temp_processor_name: String::new(),
         }
     }
 }
@@ -579,6 +585,12 @@ impl eframe::App for ControlApp {
             }
         }
 
+        if self.state.lock().unwrap().session.poll_reload_fans() {
+            let session = Arc::clone(&self.state.lock().unwrap().session);
+            session.adopt_saved_fan_curves();
+            refresh_metrics(&self.state);
+        }
+
         maybe_temp_alert(self);
         ctx.request_repaint_after(idle_paint_policy(self.hidden_to_tray).repaint_after);
     }
@@ -682,6 +694,8 @@ impl eframe::App for ControlApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.stop.store(true, Ordering::SeqCst);
+        let session = Arc::clone(&self.state.lock().unwrap().session);
+        session.shutdown();
     }
 }
 
@@ -772,11 +786,49 @@ fn draw_apu(
     state: &mut UiState,
     shared: &Arc<Mutex<UiState>>,
 ) {
+    let default_name = host_name();
+    let custom_name = state.session.config.lock().unwrap().processor_custom_name();
+    let name = fan::display_name(custom_name.as_deref(), &default_name);
+    let has_custom = custom_name.is_some();
+
     card(theme).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.heading(t(lang, "processor"));
-            if state.edit.apu_applying {
-                ui.add(egui::Spinner::new().size(14.0));
+            if state.edit.renaming_processor {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.edit.temp_processor_name)
+                        .desired_width((ui.available_width() - 108.0).max(72.0))
+                        .hint_text(&default_name),
+                );
+                if !response.has_focus() && !response.lost_focus() {
+                    response.request_focus();
+                }
+                let restore = ui.small_button(t(lang, "restore_default")).clicked();
+                let enter =
+                    response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+                if restore {
+                    persist_processor_name(state, None);
+                    state.edit.renaming_processor = false;
+                } else if escape {
+                    state.edit.renaming_processor = false;
+                } else if enter || response.lost_focus() {
+                    persist_processor_name(state, Some(state.edit.temp_processor_name.clone()));
+                    state.edit.renaming_processor = false;
+                }
+            } else {
+                ui.heading(&name);
+                if state.edit.apu_applying {
+                    ui.add(egui::Spinner::new().size(14.0));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if has_custom && ui.small_button(t(lang, "restore_default")).clicked() {
+                        persist_processor_name(state, None);
+                    }
+                    if ui.small_button(t(lang, "rename")).clicked() {
+                        state.edit.temp_processor_name = name.clone();
+                        state.edit.renaming_processor = true;
+                    }
+                });
             }
         });
         ui.add_space(6.0);
@@ -1037,6 +1089,7 @@ fn draw_settings(
     let mut temperature_source;
     let mut temp_alert_enabled;
     let mut temp_alert_celsius;
+    let mut smoothing_window;
     {
         let config = state.session.config.lock().unwrap();
         close_to_tray = config.close_to_tray;
@@ -1045,6 +1098,7 @@ fn draw_settings(
         temperature_source = config.temperature_source.clone();
         temp_alert_enabled = config.temp_alert_enabled;
         temp_alert_celsius = i32::from(config.temp_alert_celsius);
+        smoothing_window = i32::from(config.smoothing_window);
     }
 
     card(theme).show(ui, |ui| {
@@ -1125,6 +1179,22 @@ fn draw_settings(
         });
         ui.label(
             RichText::new(t(lang, "temp_source_hint"))
+                .small()
+                .color(theme.muted),
+        );
+        hairline(ui, theme);
+        ui.label(RichText::new(t(lang, "smoothing_window")).color(theme.text));
+        if ui
+            .add(egui::Slider::new(
+                &mut smoothing_window,
+                i32::from(SMOOTHING_WINDOW_MIN)..=i32::from(SMOOTHING_WINDOW_MAX),
+            ))
+            .changed()
+        {
+            persist_smoothing(state, smoothing_window as u8);
+        }
+        ui.label(
+            RichText::new(t(lang, "smoothing_window_hint"))
                 .small()
                 .color(theme.muted),
         );
@@ -1335,6 +1405,15 @@ fn link_line(ui: &mut egui::Ui, theme: &Theme, label: &str, url: &str) {
     });
 }
 
+fn persist_processor_name(state: &mut UiState, name: Option<String>) {
+    let default_name = host_name();
+    let stored = name
+        .as_deref()
+        .and_then(fan::sanitize_name)
+        .filter(|value| value != &default_name);
+    state.session.set_processor_name(stored);
+}
+
 fn persist_fan_name(state: &mut UiState, index: usize, name: Option<String>) {
     let fan_id = (index + 1) as u8;
     let default_name = {
@@ -1394,6 +1473,10 @@ fn persist_temp_source(state: &mut UiState, source: String) {
         return;
     }
     state.session.controller.set_preferred_temperature(parsed);
+}
+
+fn persist_smoothing(state: &mut UiState, window: u8) {
+    state.session.set_smoothing_window(window);
 }
 
 fn persist_alert(state: &mut UiState, enabled: bool, celsius: u8) {
@@ -1459,11 +1542,18 @@ fn import_config(state: &mut UiState, shared: &Arc<Mutex<UiState>>, hwnd: isize)
         state.error_at = Some(Instant::now());
         return;
     }
-    let preferred = state.session.config.lock().unwrap().temperature_source();
+    let (preferred, smoothing_window) = {
+        let config = state.session.config.lock().unwrap();
+        (config.temperature_source(), config.smoothing_window)
+    };
     state
         .session
         .controller
         .set_preferred_temperature(preferred);
+    state
+        .session
+        .controller
+        .set_smoothing_window(smoothing_window);
     if let Err(error) = set_start_with_windows(start_with_windows) {
         state.error = Some(error);
         state.error_at = Some(Instant::now());

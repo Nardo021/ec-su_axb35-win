@@ -1,6 +1,6 @@
 [package]
 name = "evox2-control"
-version = "2.3.1"
+version = "2.4.0"
 edition = "2021"
 build = "build.rs"
 
@@ -10,7 +10,7 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-winapi = { version = "0.3", features = ["winnt", "winerror", "handleapi", "fileapi", "ioapiset", "minwinbase", "errhandlingapi", "winbase", "processthreadsapi", "securitybaseapi", "winuser", "consoleapi", "processenv", "synchapi", "winreg", "wincon", "shellapi", "libloaderapi", "commdlg", "winnls", "stringapiset"] }
+winapi = { version = "0.3", features = ["winnt", "winerror", "handleapi", "fileapi", "ioapiset", "minwinbase", "errhandlingapi", "winbase", "processthreadsapi", "securitybaseapi", "winuser", "consoleapi", "processenv", "synchapi", "winreg", "wincon", "shellapi", "libloaderapi", "commdlg", "winnls", "stringapiset", "sysinfoapi"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

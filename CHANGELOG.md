@@ -5,6 +5,27 @@ All notable changes to ec-su_axb35-win are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-08-16
+
+Curve mode no longer leaves fans stuck on a software level after the
+app exits, and fan curves average recent temperatures before changing
+level.
+
+### Added
+
+- Exiting, signing out, or shutting down writes curve fans back to EC
+  AUTO. Saved curve settings stay in `config.json` and are restored the
+  next time the window starts. Fixed and auto fans are left alone.
+- Settings slider for curve smoothing window (1–20 samples, default 8).
+  Fan curves use the average of the last N readings before changing
+  level. Export/import include this value.
+- Processor card title uses the Windows host name and can be renamed.
+
+### Changed
+
+- `evox2ctl fan … curve` is refused unless `evox2-control` is already
+  running and monitoring. `--dry-run` still works without the window.
+
 ## [2.3.1] - 2026-08-16
 
 Idle CPU no longer stays near 3% of the machine after the window is
@@ -98,6 +119,7 @@ changed enough to warrant a minor bump rather than 2.0.1.
 First PawnIO release: one window plus tray, no Windows service, Secure Boot
 can stay enabled. See the GitHub Release for that tag.
 
+[2.4.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.3.1...v2.4.0
 [2.3.1]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.1.0...v2.2.0

@@ -9,6 +9,7 @@ use std::time::Duration;
 use eframe::egui;
 use winapi::shared::minwindef::{HINSTANCE, LPARAM, LRESULT, UINT, WPARAM};
 use winapi::shared::windef::{HICON, HMENU, HWND, POINT};
+use winapi::um::consoleapi::SetConsoleCtrlHandler;
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::processthreadsapi::{GetCurrentProcessId, GetCurrentThreadId};
 use winapi::um::shellapi::{
@@ -16,6 +17,7 @@ use winapi::um::shellapi::{
     NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_KEYSELECT, NIN_SELECT,
     NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
 };
+use winapi::um::wincon::{CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT};
 use winapi::um::winuser::{
     AppendMenuW, AttachThreadInput, BringWindowToTop, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW,
@@ -83,7 +85,26 @@ pub fn start(session: Arc<AppSession>) -> Receiver<TrayEvent> {
         }
         thread::sleep(Duration::from_millis(20));
     }
+    register_shutdown_handler();
     rx
+}
+
+fn register_shutdown_handler() {
+    unsafe {
+        SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
+    }
+}
+
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
+    match ctrl_type {
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+            if let Some(session) = current_session() {
+                session.shutdown();
+            }
+            1
+        }
+        _ => 0,
+    }
 }
 
 pub fn bind_gui(ctx: egui::Context, hwnd: isize) {

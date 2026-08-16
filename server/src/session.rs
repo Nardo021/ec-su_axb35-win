@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::config::{FanConfig, ServerConfig};
@@ -8,7 +8,9 @@ use crate::ec::{format_firmware_version, EcController, EcOperation, EcResult};
 use crate::hardware::HardwareIdentity;
 use crate::logger::Logger;
 use crate::pawnio::{lpcacpiec_loaded, pawnio_connected, PawnIoBackend, PAWNIO_MISSING_MESSAGE};
-use crate::platform::{is_admin, pawnio_install_version, secure_boot_status, InstanceGuard};
+use crate::platform::{
+    is_admin, pawnio_install_version, secure_boot_status, InstanceGuard, ReloadFansGuard,
+};
 use crate::thermal::{TemperatureSource, ThermalSnapshot};
 
 pub type LiveController = Arc<EcController<PawnIoBackend>>;
@@ -58,6 +60,9 @@ pub struct AppSession {
     pub logger: Arc<Mutex<Logger>>,
     pub runtime: Arc<RuntimeStatus>,
     stop: Arc<AtomicBool>,
+    released: AtomicBool,
+    monitor: Mutex<Option<JoinHandle<()>>>,
+    reload_fans: Option<Arc<ReloadFansGuard>>,
     _instance: Option<InstanceGuard>,
 }
 
@@ -140,7 +145,11 @@ impl AppSession {
         }
 
         let controller = Arc::new(EcController::initialize(backend, hardware)?);
-        controller.set_preferred_temperature(config.lock().unwrap().temperature_source());
+        {
+            let config_guard = config.lock().unwrap();
+            controller.set_preferred_temperature(config_guard.temperature_source());
+            controller.set_smoothing_window(config_guard.smoothing_window);
+        }
         {
             let mut log = logger.lock().unwrap();
             log.info("EC controller initialized successfully");
@@ -171,12 +180,30 @@ impl AppSession {
             hardware_supported: controller.hardware().is_supported_axb35(),
         });
 
+        let reload_fans = if options.exclusive {
+            match ReloadFansGuard::create() {
+                Ok(guard) => Some(Arc::new(guard)),
+                Err(error) => {
+                    logger
+                        .lock()
+                        .unwrap()
+                        .warn(&format!("Fan reload event unavailable: {error}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let session = Self {
             controller,
             config,
             logger,
             runtime,
             stop: Arc::new(AtomicBool::new(false)),
+            released: AtomicBool::new(false),
+            monitor: Mutex::new(None),
+            reload_fans,
             _instance: instance,
         };
 
@@ -191,10 +218,28 @@ impl AppSession {
 
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.logger
-            .lock()
-            .unwrap()
-            .info(&format!("{} shutting down", crate::i18n::APP_NAME));
+        if let Some(handle) = self.monitor.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        if !self.released.swap(true, Ordering::SeqCst) {
+            match self.controller.release_curve_fans_to_auto() {
+                Ok(messages) => {
+                    let mut log = self.logger.lock().unwrap();
+                    for message in messages {
+                        log.info(&message);
+                    }
+                }
+                Err(error) => self
+                    .logger
+                    .lock()
+                    .unwrap()
+                    .warn(&format!("Failed to reset curve fans to AUTO: {error}")),
+            }
+            self.logger
+                .lock()
+                .unwrap()
+                .info(&format!("{} shutting down", crate::i18n::APP_NAME));
+        }
     }
 
     pub fn firmware_version(&self) -> Result<String, String> {
@@ -438,16 +483,69 @@ impl AppSession {
             .info("Parameter restoration completed");
     }
 
+    pub fn poll_reload_fans(&self) -> bool {
+        self.reload_fans.as_ref().is_some_and(|guard| guard.poll())
+    }
+
+    pub fn adopt_saved_fan_curves(&self) {
+        let fresh = match ServerConfig::load() {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                self.logger
+                    .lock()
+                    .unwrap()
+                    .warn(&format!("Failed to reload fan configuration: {error}"));
+                return;
+            }
+        };
+        let fans = [fresh.fan1.clone(), fresh.fan2.clone(), fresh.fan3.clone()];
+        {
+            let mut config = self.config.lock().unwrap();
+            config.fan1 = fresh.fan1;
+            config.fan2 = fresh.fan2;
+            config.fan3 = fresh.fan3;
+        }
+        apply_stored_fans(&self.controller, fans, &self.logger);
+        self.logger
+            .lock()
+            .unwrap()
+            .info("Adopted fan settings from configuration");
+    }
+
     fn spawn_curve_monitor(&self) {
         let controller = Arc::clone(&self.controller);
+        let config = Arc::clone(&self.config);
         let logger = Arc::clone(&self.logger);
         let stop = Arc::clone(&self.stop);
-        thread::spawn(move || {
+        let reload = self.reload_fans.clone();
+        let handle = thread::spawn(move || {
             let mut active = false;
             while !stop.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(250));
                 if stop.load(Ordering::SeqCst) {
                     break;
+                }
+                if reload.as_ref().is_some_and(|guard| guard.poll()) {
+                    match ServerConfig::load() {
+                        Ok(fresh) => {
+                            let fans = [fresh.fan1.clone(), fresh.fan2.clone(), fresh.fan3.clone()];
+                            {
+                                let mut config = config.lock().unwrap();
+                                config.fan1 = fresh.fan1;
+                                config.fan2 = fresh.fan2;
+                                config.fan3 = fresh.fan3;
+                            }
+                            apply_stored_fans(&controller, fans, &logger);
+                            logger
+                                .lock()
+                                .unwrap()
+                                .info("Adopted fan settings from configuration");
+                        }
+                        Err(error) => logger
+                            .lock()
+                            .unwrap()
+                            .warn(&format!("Failed to reload fan configuration: {error}")),
+                    }
                 }
                 let has_curve = controller.has_curve_fans();
                 if has_curve && !active {
@@ -457,6 +555,7 @@ impl AppSession {
                         .info("Curve monitoring started - fans in curve mode detected");
                     active = true;
                 } else if !has_curve && active {
+                    controller.clear_temp_window();
                     logger
                         .lock()
                         .unwrap()
@@ -480,6 +579,7 @@ impl AppSession {
                 }
             }
         });
+        *self.monitor.lock().unwrap() = Some(handle);
     }
 
     fn update_fan_config(&self, fan_id: u8, update: impl FnOnce(&mut FanConfig)) {
@@ -508,5 +608,77 @@ impl AppSession {
         self.update_fan_config(fan_id, |fan| {
             fan.name = name.as_deref().and_then(crate::fan::sanitize_name);
         });
+    }
+
+    pub fn set_processor_name(&self, name: Option<String>) {
+        let mut config = self.config.lock().unwrap();
+        config.processor_name = name.as_deref().and_then(crate::fan::sanitize_name);
+        if let Err(error) = config.save() {
+            self.logger
+                .lock()
+                .unwrap()
+                .warn(&format!("Failed to save processor name: {error}"));
+        }
+    }
+
+    pub fn set_smoothing_window(&self, window: u8) {
+        let window = crate::config::clamp_smoothing_window(window);
+        self.controller.set_smoothing_window(window);
+        let mut config = self.config.lock().unwrap();
+        config.smoothing_window = window;
+        if let Err(error) = config.save() {
+            self.logger
+                .lock()
+                .unwrap()
+                .warn(&format!("Failed to save smoothing window: {error}"));
+        }
+    }
+}
+
+fn apply_stored_fans(
+    controller: &EcController<PawnIoBackend>,
+    fans: [Option<FanConfig>; 3],
+    logger: &Mutex<Logger>,
+) {
+    for (index, fan) in fans.into_iter().enumerate() {
+        let fan_id = (index + 1) as u8;
+        let Some(fan) = fan else {
+            continue;
+        };
+        if let Err(error) =
+            controller.execute_operation(EcOperation::SetFanMode(fan_id, fan.mode.clone()))
+        {
+            logger
+                .lock()
+                .unwrap()
+                .warn(&format!("Failed to adopt Fan{fan_id} mode: {error}"));
+            continue;
+        }
+        if fan.mode != "auto" {
+            if let Err(error) =
+                controller.execute_operation(EcOperation::SetFanLevel(fan_id, fan.level))
+            {
+                logger
+                    .lock()
+                    .unwrap()
+                    .warn(&format!("Failed to adopt Fan{fan_id} level: {error}"));
+            }
+        }
+        if let Err(error) =
+            controller.execute_operation(EcOperation::SetFanRampupCurve(fan_id, fan.rampup_curve))
+        {
+            logger
+                .lock()
+                .unwrap()
+                .warn(&format!("Failed to adopt Fan{fan_id} rampup: {error}"));
+        }
+        if let Err(error) = controller
+            .execute_operation(EcOperation::SetFanRampdownCurve(fan_id, fan.rampdown_curve))
+        {
+            logger
+                .lock()
+                .unwrap()
+                .warn(&format!("Failed to adopt Fan{fan_id} rampdown: {error}"));
+        }
     }
 }

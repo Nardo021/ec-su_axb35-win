@@ -1,5 +1,8 @@
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use crate::config::{clamp_smoothing_window, SMOOTHING_WINDOW_DEFAULT};
+use crate::curve::{average_temps, next_fan_level, push_temp_sample};
 use crate::ec_io::{is_acpi_ec_port, EcIoBackend, EC_COMMAND_PORT, EC_DATA_PORT};
 use crate::hardware::HardwareIdentity;
 use crate::platform::AccessEcGuard;
@@ -152,6 +155,8 @@ pub struct EcController<B: EcIoBackend> {
     transaction: Mutex<()>,
     fan_curves: Mutex<[FanCurveData; 3]>,
     preferred_temperature: Mutex<TemperatureSource>,
+    temp_window: Mutex<VecDeque<u8>>,
+    smoothing_window: Mutex<u8>,
     writes_allowed: bool,
     hardware: HardwareIdentity,
 }
@@ -167,6 +172,8 @@ impl<B: EcIoBackend> EcController<B> {
             transaction: Mutex::new(()),
             fan_curves: Mutex::new(curves),
             preferred_temperature: Mutex::new(TemperatureSource::Gpu),
+            temp_window: Mutex::new(VecDeque::new()),
+            smoothing_window: Mutex::new(SMOOTHING_WINDOW_DEFAULT),
             writes_allowed: true,
             hardware: HardwareIdentity::default(),
         }
@@ -429,7 +436,13 @@ impl<B: EcIoBackend> EcController<B> {
         }
 
         let mut log_messages = Vec::new();
-        let temp = self.read_control_temperature()?;
+        let sample = self.read_control_temperature()?;
+        let temp = {
+            let max_len = *self.smoothing_window.lock().unwrap();
+            let mut window = self.temp_window.lock().unwrap();
+            push_temp_sample(&mut window, sample, max_len);
+            average_temps(window.make_contiguous()).unwrap_or(sample)
+        };
         let curves = self.fan_curves.lock().unwrap();
 
         for fan_id in 1..=3 {
@@ -437,19 +450,19 @@ impl<B: EcIoBackend> EcController<B> {
 
             if curves[fan_idx].mode == FanMode::Curve {
                 let current_level = self.read_fan_level(fan_id)?;
-                let mut new_level = current_level;
+                let new_level = next_fan_level(
+                    current_level,
+                    temp,
+                    &curves[fan_idx].rampup_curve,
+                    &curves[fan_idx].rampdown_curve,
+                );
 
-                if current_level < 5 && temp >= curves[fan_idx].rampup_curve[current_level as usize]
-                {
-                    new_level = current_level + 1;
+                if new_level > current_level {
                     log_messages.push(format!(
                         "Fan{fan_id} ramping up to level {new_level} (temp: {temp}°C, threshold: {}°C)",
                         curves[fan_idx].rampup_curve[current_level as usize]
                     ));
-                } else if current_level > 0
-                    && temp <= curves[fan_idx].rampdown_curve[(current_level - 1) as usize]
-                {
-                    new_level = current_level - 1;
+                } else if new_level < current_level {
                     log_messages.push(format!(
                         "Fan{fan_id} ramping down to level {new_level} (temp: {temp}°C, threshold: {}°C)",
                         curves[fan_idx].rampdown_curve[(current_level - 1) as usize]
@@ -465,6 +478,47 @@ impl<B: EcIoBackend> EcController<B> {
         }
 
         Ok(log_messages)
+    }
+
+    pub fn release_curve_fans_to_auto(&self) -> Result<Vec<String>, String> {
+        if !self.writes_allowed {
+            return Ok(Vec::new());
+        }
+
+        let mut reset = Vec::new();
+        {
+            let mut curves = self.fan_curves.lock().unwrap();
+            for (index, curve) in curves.iter_mut().enumerate() {
+                if curve.mode == FanMode::Curve {
+                    curve.mode = FanMode::Auto;
+                    reset.push((index as u8) + 1);
+                }
+            }
+        }
+        self.temp_window.lock().unwrap().clear();
+
+        let mut log_messages = Vec::new();
+        for fan_id in reset {
+            let mode_reg = self.get_fan_mode_register(fan_id)?;
+            let mode_val = match fan_id {
+                1 => 0x10,
+                2 => 0x20,
+                3 => 0x30,
+                _ => continue,
+            };
+            self.write_byte(mode_reg, mode_val)?;
+            log_messages.push(format!("Fan{fan_id} reset to AUTO mode"));
+        }
+        Ok(log_messages)
+    }
+
+    pub fn set_smoothing_window(&self, window: u8) {
+        let window = clamp_smoothing_window(window);
+        *self.smoothing_window.lock().unwrap() = window;
+        let mut samples = self.temp_window.lock().unwrap();
+        while samples.len() > usize::from(window) {
+            samples.pop_front();
+        }
     }
 
     pub fn read_ec_apu_temperature(&self) -> Result<u8, String> {
@@ -490,6 +544,10 @@ impl<B: EcIoBackend> EcController<B> {
     pub fn has_curve_fans(&self) -> bool {
         let curves = self.fan_curves.lock().unwrap();
         curves.iter().any(|curve| curve.mode == FanMode::Curve)
+    }
+
+    pub fn clear_temp_window(&self) {
+        self.temp_window.lock().unwrap().clear();
     }
 
     fn read_firmware_version(&self) -> Result<(u8, u8), String> {
@@ -833,5 +891,93 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("Unsupported hardware"));
         assert_eq!(mock.register(EC_REG_APU_POWER_MODE), 0);
+    }
+
+    fn curve_controller(mock: MockEcIoBackend) -> EcController<MockEcIoBackend> {
+        let controller = EcController::new_unchecked(mock);
+        controller.set_preferred_temperature(TemperatureSource::Ec);
+        controller
+    }
+
+    #[test]
+    fn window_of_one_ramps_on_a_single_threshold_sample() {
+        let mock = MockEcIoBackend::with_firmware(1, 4);
+        mock.set_register(EC_REG_APU_TEMPERATURE, 50);
+        let controller = curve_controller(mock.clone());
+        controller.set_smoothing_window(1);
+        controller
+            .execute_operation(EcOperation::SetFanMode(1, "curve".into()))
+            .unwrap();
+        controller
+            .execute_operation(EcOperation::SetFanLevel(1, 0))
+            .unwrap();
+
+        mock.set_register(EC_REG_APU_TEMPERATURE, 60);
+        let messages = controller.update_curve_fans().unwrap();
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("ramping up")));
+        let EcResult::FanLevel(level) = controller
+            .execute_operation(EcOperation::GetFanLevel(1))
+            .unwrap()
+        else {
+            panic!("expected fan level");
+        };
+        assert_eq!(level, 1);
+    }
+
+    #[test]
+    fn window_of_eight_ignores_a_single_spike() {
+        let mock = MockEcIoBackend::with_firmware(1, 4);
+        mock.set_register(EC_REG_APU_TEMPERATURE, 50);
+        let controller = curve_controller(mock.clone());
+        controller.set_smoothing_window(8);
+        controller
+            .execute_operation(EcOperation::SetFanMode(1, "curve".into()))
+            .unwrap();
+        controller
+            .execute_operation(EcOperation::SetFanLevel(1, 0))
+            .unwrap();
+
+        for _ in 0..7 {
+            assert!(controller.update_curve_fans().unwrap().is_empty());
+        }
+        mock.set_register(EC_REG_APU_TEMPERATURE, 70);
+        assert!(controller.update_curve_fans().unwrap().is_empty());
+        let EcResult::FanLevel(level) = controller
+            .execute_operation(EcOperation::GetFanLevel(1))
+            .unwrap()
+        else {
+            panic!("expected fan level");
+        };
+        assert_eq!(level, 0);
+    }
+
+    #[test]
+    fn release_curve_fans_writes_auto_only_for_curve() {
+        let mock = MockEcIoBackend::with_firmware(1, 4);
+        mock.set_register(EC_REG_APU_TEMPERATURE, 50);
+        let controller = curve_controller(mock.clone());
+        controller
+            .execute_operation(EcOperation::SetFanMode(1, "fixed".into()))
+            .unwrap();
+        controller
+            .execute_operation(EcOperation::SetFanMode(2, "curve".into()))
+            .unwrap();
+        let fan1_before = mock.register(EC_REG_FAN1_MODE);
+
+        let messages = controller.release_curve_fans_to_auto().unwrap();
+        assert_eq!(messages, vec!["Fan2 reset to AUTO mode".to_string()]);
+        assert_eq!(mock.register(EC_REG_FAN2_MODE), 0x20);
+        assert_eq!(mock.register(EC_REG_FAN1_MODE), fan1_before);
+        assert_eq!(mock.register(EC_REG_FAN3_MODE), 0);
+
+        let EcResult::FanMode(mode) = controller
+            .execute_operation(EcOperation::GetFanMode(2))
+            .unwrap()
+        else {
+            panic!("expected fan mode");
+        };
+        assert_eq!(mode, "auto");
     }
 }

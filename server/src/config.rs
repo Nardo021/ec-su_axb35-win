@@ -7,6 +7,18 @@ use crate::fan::{self, sanitize_name};
 use crate::i18n::Language;
 use crate::thermal::TemperatureSource;
 
+pub const SMOOTHING_WINDOW_DEFAULT: u8 = 8;
+pub const SMOOTHING_WINDOW_MIN: u8 = 1;
+pub const SMOOTHING_WINDOW_MAX: u8 = 20;
+
+pub fn clamp_smoothing_window(value: u8) -> u8 {
+    value.clamp(SMOOTHING_WINDOW_MIN, SMOOTHING_WINDOW_MAX)
+}
+
+fn default_smoothing_window() -> u8 {
+    SMOOTHING_WINDOW_DEFAULT
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FanConfig {
     pub mode: String,
@@ -70,6 +82,10 @@ pub struct ServerConfig {
     pub temp_alert_celsius: u8,
     #[serde(default = "default_temperature_source")]
     pub temperature_source: String,
+    #[serde(default = "default_smoothing_window")]
+    pub smoothing_window: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processor_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -85,6 +101,10 @@ pub struct PortableConfig {
     pub temp_alert_celsius: u8,
     #[serde(default = "default_temperature_source")]
     pub temperature_source: String,
+    #[serde(default = "default_smoothing_window")]
+    pub smoothing_window: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processor_name: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -109,6 +129,8 @@ impl Default for ServerConfig {
             temp_alert_enabled: default_temp_alert_enabled(),
             temp_alert_celsius: default_temp_alert_celsius(),
             temperature_source: default_temperature_source(),
+            smoothing_window: default_smoothing_window(),
+            processor_name: None,
         }
     }
 }
@@ -129,6 +151,10 @@ impl ServerConfig {
 
     pub fn temperature_source(&self) -> TemperatureSource {
         TemperatureSource::from_code(&self.temperature_source)
+    }
+
+    pub fn processor_custom_name(&self) -> Option<String> {
+        self.processor_name.as_deref().and_then(sanitize_name)
     }
 
     pub fn fan_custom_name(&self, fan_id: u8) -> Option<String> {
@@ -169,7 +195,9 @@ impl ServerConfig {
         }
         config.temp_alert_celsius = clamp_threshold(config.temp_alert_celsius);
         config.temperature_source = config.temperature_source().code().to_string();
+        config.smoothing_window = clamp_smoothing_window(config.smoothing_window);
         sanitize_fan_names(&mut config);
+        config.processor_name = config.processor_name.as_deref().and_then(sanitize_name);
 
         Ok(config)
     }
@@ -201,6 +229,8 @@ impl ServerConfig {
             temp_alert_enabled: self.temp_alert_enabled,
             temp_alert_celsius: clamp_threshold(self.temp_alert_celsius),
             temperature_source: self.temperature_source().code().to_string(),
+            smoothing_window: clamp_smoothing_window(self.smoothing_window),
+            processor_name: self.processor_name.as_deref().and_then(sanitize_name),
         }
     }
 
@@ -226,6 +256,8 @@ impl ServerConfig {
         self.temperature_source = TemperatureSource::from_code(&portable.temperature_source)
             .code()
             .to_string();
+        self.smoothing_window = clamp_smoothing_window(portable.smoothing_window);
+        self.processor_name = portable.processor_name.as_deref().and_then(sanitize_name);
     }
 }
 
@@ -261,6 +293,17 @@ impl PortableConfig {
                 "Invalid temperature source: {}",
                 self.temperature_source
             ));
+        }
+        if !(SMOOTHING_WINDOW_MIN..=SMOOTHING_WINDOW_MAX).contains(&self.smoothing_window) {
+            return Err(format!(
+                "Smoothing window must be between {SMOOTHING_WINDOW_MIN} and {SMOOTHING_WINDOW_MAX}, got {}",
+                self.smoothing_window
+            ));
+        }
+        if let Some(label) = &self.processor_name {
+            if label.chars().count() > fan::NAME_MAX_CHARS * 2 {
+                return Err("Invalid processor name: too long".to_string());
+            }
         }
         Ok(())
     }
@@ -319,6 +362,8 @@ mod tests {
         assert_eq!(parsed.temp_alert_celsius, 90);
         assert_eq!(parsed.temperature_source, "gpu");
         assert_eq!(parsed.temperature_source(), TemperatureSource::Gpu);
+        assert_eq!(parsed.smoothing_window, SMOOTHING_WINDOW_DEFAULT);
+        assert_eq!(parsed.processor_name, None);
     }
 
     #[test]
@@ -347,6 +392,7 @@ mod tests {
         assert!(!json.contains("log_path"));
         assert!(json.contains("temp_alert_enabled"));
         assert!(json.contains("\"temperature_source\":\"gpu\""));
+        assert!(json.contains("\"smoothing_window\":8"));
     }
 
     #[test]
@@ -385,6 +431,22 @@ mod tests {
     }
 
     #[test]
+    fn portable_import_rejects_bad_smoothing_window() {
+        let mut portable = ServerConfig::default().to_portable();
+        portable.smoothing_window = 0;
+        assert!(portable.validate().is_err());
+        portable.smoothing_window = 21;
+        assert!(portable.validate().is_err());
+    }
+
+    #[test]
+    fn clamp_smoothing_window_keeps_one_to_twenty() {
+        assert_eq!(clamp_smoothing_window(0), 1);
+        assert_eq!(clamp_smoothing_window(8), 8);
+        assert_eq!(clamp_smoothing_window(99), 20);
+    }
+
+    #[test]
     fn portable_import_accepts_valid_file() {
         let json = serde_json::to_string_pretty(&ServerConfig::default().to_portable()).unwrap();
         let parsed = PortableConfig::parse_json(&json).unwrap();
@@ -400,6 +462,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed.name, None);
+    }
+
+    #[test]
+    fn processor_custom_name_roundtrips() {
+        let mut config = ServerConfig::default();
+        config.processor_name = Some("  MiniPC  ".into());
+        config.processor_name = config.processor_name.as_deref().and_then(sanitize_name);
+        assert_eq!(config.processor_custom_name().as_deref(), Some("MiniPC"));
+        let json = serde_json::to_string(&config.to_portable()).unwrap();
+        assert!(json.contains("MiniPC"));
+        let parsed = PortableConfig::parse_json(&json).unwrap();
+        assert_eq!(parsed.processor_name.as_deref(), Some("MiniPC"));
     }
 
     #[test]

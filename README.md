@@ -14,8 +14,8 @@ This application does not require Secure Boot to be disabled.
 
 See [docs/PAWNIO_MIGRATION.md](docs/PAWNIO_MIGRATION.md) for the driver change.
 
-**Download the latest release, currently [v2.3.1](https://github.com/Nardo021/ec-su_axb35-win/releases/latest).**
-Most people should take `ec-su_axb35-win-installer-2.3.1.exe`. See [Download](#download).
+**Download the latest release, currently [v2.4.0](https://github.com/Nardo021/ec-su_axb35-win/releases/latest).**
+Most people should take `ec-su_axb35-win-installer-2.4.0.exe`. See [Download](#download).
 
 ## Requirements
 
@@ -30,7 +30,7 @@ secure configuration.
 
 ## Download
 
-Use the **latest** GitHub Release (currently **v2.3.1**):
+Use the **latest** GitHub Release (currently **v2.4.0**):
 
 https://github.com/Nardo021/ec-su_axb35-win/releases/latest
 
@@ -40,8 +40,8 @@ those still rely on WinRing0.
 
 | File on the release page | Who it is for |
 | --- | --- |
-| `ec-su_axb35-win-installer-2.3.1.exe` | Normal install. **Download this** unless you have a reason not to. |
-| `evox2-control-v2.3.1.zip` | Portable copy: GUI and CLI in one folder. |
+| `ec-su_axb35-win-installer-2.4.0.exe` | Normal install. **Download this** unless you have a reason not to. |
+| `evox2-control-v2.4.0.zip` | Portable copy: GUI and CLI in one folder. |
 | `evox2-control.exe` | Window and tray only. Same program as the CLI binary. |
 | `evox2ctl.exe` | Command line only. Same program as `evox2-control.exe`, renamed. |
 | Source code (zip / tar.gz) | Source for building. **Not** a Windows app. Skip this. |
@@ -59,8 +59,10 @@ PawnIO is not in any of those files. Install it from https://pawnio.eu/ first.
    through PawnIO requires elevation.
 3. Double-click `evox2-control.exe`. That is the only program you need.
 4. Closing the window hides it to the tray by default. Curve monitoring keeps
-   running. Use the tray menu or Settings to quit. Power mode and fan settings
-   are written immediately and restored the next time the app starts.
+   running. Use the tray menu or Settings to quit. Quitting (or Windows
+   shutdown / sign-out) writes curve fans back to firmware AUTO. Power mode
+   and fan settings are written immediately and restored the next time the
+   app starts.
 
 If an older build left the `ec-su_axb35-win` Windows service running, stop and
 remove it so it does not keep a second copy in the background:
@@ -99,7 +101,8 @@ in-process. It does not need a separate server process.
 A second double-click focuses the existing window instead of opening another
 EC session.
 
-The processor block shows temperature, the current power mode, and a selector:
+The processor block is titled with this computer's host name (rename it
+like a fan). It shows temperature, the current power mode, and a selector:
 
 ```text
 Temperature: 48°C  GPU driver (Task Manager)
@@ -147,6 +150,9 @@ control returns to processor and fan controls.
 - Language: English (default) or Chinese
 - Temperature source: GPU (default), CPU, SoC, GPU hotspot, or EC 0x70.
   This is the processor reading used for fan curves and alerts
+- Curve smoothing window: average of the last 1–20 temperature readings
+  (default 8, about 2 seconds) before a curve fan changes level. 1 is
+  the old immediate behavior
 - Temperature alert: tray balloon when the processor temperature stays at or above
   the threshold (default 90°C, range 70–97). Alerts wait at least 10 minutes
   between notifications
@@ -176,6 +182,13 @@ evox2ctl fan cpu auto
 evox2ctl fan 1 fixed 3
 evox2ctl fan 3 curve 20,60,83,95,97 0,50,80,94,96
 evox2ctl fan 1 auto --dry-run
+```
+
+`fan … curve` needs `evox2-control` already running so the window can keep
+adjusting levels. Without the window the command exits with code 2 and
+does not leave the EC in manual mode. `--dry-run` is allowed either way.
+
+```powershell
 evox2ctl --json status
 evox2ctl --json diagnose
 ```
@@ -192,7 +205,7 @@ Exit codes:
 | --- | --- |
 | 0 | Success, including `--dry-run` |
 | 1 | Other runtime / EC error |
-| 2 | Usage / invalid arguments |
+| 2 | Usage / invalid arguments, including `fan … curve` without the GUI |
 | 3 | Not running as Administrator |
 | 4 | PawnIO unavailable |
 | 5 | Unsupported hardware (writes refused) |
@@ -254,13 +267,15 @@ Configuration: `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`
   "start_with_windows": false,
   "language": "en",
   "temp_alert_enabled": true,
-  "temp_alert_celsius": 90
+  "temp_alert_celsius": 90,
+  "smoothing_window": 8
 }
 ```
 
 `host` and `port` may remain in the file from older builds. They are not used.
-Import/export copies power mode, fans, tray, autostart, language, and alert
-settings only. The log is appended and rotated to `server.log.1` around 2 MB.
+Import/export copies power mode, fans, tray, autostart, language, alert
+settings, and the smoothing window. The log is appended and rotated to
+`server.log.1` around 2 MB.
 
 ## Security
 
@@ -276,11 +291,11 @@ Actions builds the Windows binaries and publishes a Release:
 
 ```powershell
 # bump version in server/Cargo.toml first, then:
-git tag v2.3.1
-git push origin v2.3.1
+git tag v2.4.0
+git push origin v2.4.0
 ```
 
-The tag must look like `v2.3.1` and match Cargo. The Release includes
+The tag must look like `v2.4.0` and match Cargo. The Release includes
 `evox2-control.exe`, `evox2ctl.exe`, a zip of both, and the NSIS installer
 when NSIS is available. Optional Authenticode signing runs only when
 `SIGNING_PFX` / `SIGNING_PASSWORD` secrets exist. PawnIO is not bundled.

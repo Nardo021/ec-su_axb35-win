@@ -112,6 +112,8 @@ pub fn exit_code_from_error(error: &str) -> i32 {
         EXIT_FIRMWARE
     } else if lower.contains("unsupported hardware") || lower.contains("ec writes are disabled") {
         EXIT_UNSUPPORTED_HARDWARE
+    } else if lower.contains("curve mode requires") || error.contains("曲线模式需要") {
+        EXIT_USAGE
     } else {
         EXIT_RUNTIME
     }
@@ -322,6 +324,13 @@ fn apply_fan_command(
         _ => return Err(usage_error(language)),
     };
 
+    if mode == "curve" && !dry_run && !crate::platform::gui_instance_running() {
+        return Err(CliError {
+            message: t(language, "curve_needs_gui").to_string(),
+            code: EXIT_USAGE,
+        });
+    }
+
     if dry_run {
         if json {
             return emit_json(&json!({
@@ -345,6 +354,9 @@ fn apply_fan_command(
 
     let session = open_session()?;
     session.apply_fan_edit(fan_id, &mode, level, rampup, rampdown_curve)?;
+    if mode == "curve" {
+        let _ = crate::platform::signal_reload_fans();
+    }
     let snapshot = session.fan_snapshot(fan_id)?;
     print_fans(
         language,
@@ -515,6 +527,18 @@ mod tests {
         assert_eq!(
             exit_code_from_error("EC timeout waiting for input buffer"),
             EXIT_RUNTIME
+        );
+        assert_eq!(
+            exit_code_from_error(
+                "Curve mode requires the running window (evox2-control). Use the GUI, or fan auto / fan fixed."
+            ),
+            EXIT_USAGE
+        );
+        assert_eq!(
+            exit_code_from_error(
+                "曲线模式需要正在运行的窗口（evox2-control）。请用图形界面设置，或改用 auto / fixed。"
+            ),
+            EXIT_USAGE
         );
         assert_eq!(EXIT_OK, 0);
         assert_ne!(EXIT_OK, EXIT_USAGE);

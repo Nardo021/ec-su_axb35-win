@@ -162,6 +162,20 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "temp_source_hint") => {
             "Used for the processor reading, fan curves, and alerts. Falls back to GPU if unavailable."
         }
+        (Language::Zh, "smoothing_window") => "曲线平滑窗口",
+        (Language::En, "smoothing_window") => "Curve smoothing window",
+        (Language::Zh, "smoothing_window_hint") => {
+            "用最近 N 次温度的平均再决定升/降档。1 为每次采样立即换档。"
+        }
+        (Language::En, "smoothing_window_hint") => {
+            "Average the last N temperature readings before changing fan level. 1 is immediate."
+        }
+        (Language::Zh, "curve_needs_gui") => {
+            "曲线模式需要正在运行的窗口（evox2-control）。请用图形界面设置，或改用 auto / fixed。"
+        }
+        (Language::En, "curve_needs_gui") => {
+            "Curve mode requires the running window (evox2-control). Use the GUI, or fan auto / fan fixed."
+        }
         (Language::Zh, "temp_gpu") => "GPU 温度：",
         (Language::En, "temp_gpu") => "GPU temp:",
         (Language::Zh, "temp_cpu") => "CPU 温度：",
@@ -277,5 +291,13 @@ mod tests {
         assert_eq!(t(Language::Zh, "processor"), "处理器");
         assert_eq!(t(Language::Zh, "restore_default"), "恢复默认");
         assert_eq!(t(Language::En, "rename"), "Rename");
+        assert_eq!(
+            t(Language::En, "smoothing_window"),
+            "Curve smoothing window"
+        );
+        assert_eq!(
+            t(Language::Zh, "curve_needs_gui"),
+            "曲线模式需要正在运行的窗口（evox2-control）。请用图形界面设置，或改用 auto / fixed。"
+        );
     }
 }

@@ -10,6 +10,7 @@ use winapi::um::winuser::{MessageBoxW, SW_SHOWNORMAL};
 mod alert;
 mod cli;
 mod config;
+mod curve;
 mod diagnose;
 mod ec;
 mod ec_io;
