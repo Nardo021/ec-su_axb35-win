@@ -19,6 +19,10 @@ fn default_smoothing_window() -> u8 {
     SMOOTHING_WINDOW_DEFAULT
 }
 
+pub fn current_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FanConfig {
     pub mode: String,
@@ -101,6 +105,8 @@ pub struct ServerConfig {
     pub smoothing_window: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processor_name: Option<String>,
+    #[serde(default = "current_app_version")]
+    pub app_version: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -120,6 +126,8 @@ pub struct PortableConfig {
     pub smoothing_window: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processor_name: Option<String>,
+    #[serde(default = "current_app_version")]
+    pub app_version: String,
 }
 
 impl Default for ServerConfig {
@@ -127,7 +135,7 @@ impl Default for ServerConfig {
         ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 8395,
-            log_path: format!("{}\\server.log", program_data_dir()),
+            log_path: log_file_path(),
             apu_power_mode: None,
             fan1: Some(FanConfig::default_for_fan(1)),
             fan2: Some(FanConfig::default_for_fan(2)),
@@ -140,6 +148,7 @@ impl Default for ServerConfig {
             temperature_source: default_temperature_source(),
             smoothing_window: default_smoothing_window(),
             processor_name: None,
+            app_version: current_app_version(),
         }
     }
 }
@@ -151,6 +160,10 @@ pub fn program_data_dir() -> String {
 
 pub fn config_file_path() -> String {
     format!("{}\\config.json", program_data_dir())
+}
+
+pub fn log_file_path() -> String {
+    format!("{}\\server.log", program_data_dir())
 }
 
 impl ServerConfig {
@@ -177,15 +190,11 @@ impl ServerConfig {
     }
 
     pub fn load() -> Result<Self, String> {
+        let _ = crate::harden::harden_program_data_dir(&program_data_dir());
         let config_path = config_file_path();
 
         if !Path::new(&config_path).exists() {
             let default_config = ServerConfig::default();
-            let config_dir = Path::new(&config_path).parent().unwrap();
-            if !config_dir.exists() {
-                fs::create_dir_all(config_dir)
-                    .map_err(|e| format!("Failed to create config directory: {}", e))?;
-            }
             let config_json = serde_json::to_string_pretty(&default_config)
                 .map_err(|e| format!("Failed to serialize default config: {}", e))?;
             fs::write(&config_path, config_json)
@@ -198,20 +207,13 @@ impl ServerConfig {
 
         let mut config: ServerConfig = serde_json::from_str(&config_content)
             .map_err(|e| format!("Failed to parse config file: {}", e))?;
-
-        if !config.log_path.contains(':') {
-            config.log_path = format!("{}\\{}", program_data_dir(), config.log_path);
-        }
-        config.temp_alert_celsius = clamp_threshold(config.temp_alert_celsius);
-        config.temperature_source = config.temperature_source().code().to_string();
-        config.smoothing_window = clamp_smoothing_window(config.smoothing_window);
-        sanitize_fan_names(&mut config);
-        config.processor_name = config.processor_name.as_deref().and_then(sanitize_name);
+        sanitize_loaded_config(&mut config);
 
         Ok(config)
     }
 
     pub fn save(&self) -> Result<(), String> {
+        let _ = crate::harden::harden_program_data_dir(&program_data_dir());
         let config_path = config_file_path();
         let config_dir = Path::new(&config_path).parent().unwrap();
         if !config_dir.exists() {
@@ -219,7 +221,10 @@ impl ServerConfig {
                 .map_err(|e| format!("Failed to create config directory: {}", e))?;
         }
 
-        let config_json = serde_json::to_string_pretty(self)
+        let mut stored = self.clone();
+        stored.log_path = log_file_path();
+        stored.app_version = current_app_version();
+        let config_json = serde_json::to_string_pretty(&stored)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
         fs::write(&config_path, config_json)
             .map_err(|e| format!("Failed to write config file: {}", e))?;
@@ -240,6 +245,7 @@ impl ServerConfig {
             temperature_source: self.temperature_source().code().to_string(),
             smoothing_window: clamp_smoothing_window(self.smoothing_window),
             processor_name: self.processor_name.as_deref().and_then(sanitize_name),
+            app_version: current_app_version(),
         }
     }
 
@@ -267,6 +273,7 @@ impl ServerConfig {
             .to_string();
         self.smoothing_window = clamp_smoothing_window(portable.smoothing_window);
         self.processor_name = portable.processor_name.as_deref().and_then(sanitize_name);
+        self.app_version = current_app_version();
     }
 }
 
@@ -333,21 +340,37 @@ fn validate_fan(name: &str, fan: &FanConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn sanitize_loaded_config(config: &mut ServerConfig) {
+    config.log_path = log_file_path();
+    config.app_version = current_app_version();
+    config.temp_alert_celsius = clamp_threshold(config.temp_alert_celsius);
+    config.temperature_source = config.temperature_source().code().to_string();
+    config.smoothing_window = clamp_smoothing_window(config.smoothing_window);
+    config.processor_name = config.processor_name.as_deref().and_then(sanitize_name);
+    if let Some(mode) = &config.apu_power_mode {
+        if !matches!(mode.as_str(), "quiet" | "balanced" | "performance") {
+            config.apu_power_mode = None;
+        }
+    }
+    reset_invalid_fan(&mut config.fan1, 1);
+    reset_invalid_fan(&mut config.fan2, 2);
+    reset_invalid_fan(&mut config.fan3, 3);
+}
+
+fn reset_invalid_fan(slot: &mut Option<FanConfig>, fan_id: u8) {
+    if let Some(fan) = slot.as_mut() {
+        if validate_fan("fan", fan).is_err() {
+            *slot = Some(FanConfig::default_for_fan(fan_id));
+            return;
+        }
+        sanitize_fan_config(fan);
+    }
+}
+
 fn sanitize_fan_config(fan: &mut FanConfig) {
     fan.name = fan.name.as_deref().and_then(sanitize_name);
 }
 
-fn sanitize_fan_names(config: &mut ServerConfig) {
-    if let Some(fan) = config.fan1.as_mut() {
-        sanitize_fan_config(fan);
-    }
-    if let Some(fan) = config.fan2.as_mut() {
-        sanitize_fan_config(fan);
-    }
-    if let Some(fan) = config.fan3.as_mut() {
-        sanitize_fan_config(fan);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -387,6 +410,23 @@ mod tests {
         assert_eq!(parsed.temperature_source(), TemperatureSource::Gpu);
         assert_eq!(parsed.smoothing_window, SMOOTHING_WINDOW_DEFAULT);
         assert_eq!(parsed.processor_name, None);
+        assert_eq!(parsed.app_version, "2.5.1");
+    }
+
+    #[test]
+    fn sanitize_loaded_config_stamps_current_app_version() {
+        let mut parsed: ServerConfig = serde_json::from_str(
+            r#"{
+                "host": "127.0.0.1",
+                "port": 8395,
+                "log_path": "C:\\ProgramData\\ec-su_axb35-win\\server.log",
+                "app_version": "2.4.0"
+            }"#,
+        )
+        .unwrap();
+        sanitize_loaded_config(&mut parsed);
+        assert_eq!(parsed.app_version, current_app_version());
+        assert_eq!(parsed.app_version, "2.5.1");
     }
 
     #[test]
@@ -416,6 +456,7 @@ mod tests {
         assert!(json.contains("temp_alert_enabled"));
         assert!(json.contains("\"temperature_source\":\"gpu\""));
         assert!(json.contains("\"smoothing_window\":8"));
+        assert!(json.contains("\"app_version\":\"2.5.1\""));
     }
 
     #[test]
@@ -470,6 +511,62 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_loaded_config_ignores_absolute_log_path() {
+        let mut parsed: ServerConfig = serde_json::from_str(
+            r#"{
+                "host": "127.0.0.1",
+                "port": 8395,
+                "log_path": "C:\\Windows\\System32\\license.rtf"
+            }"#,
+        )
+        .unwrap();
+        sanitize_loaded_config(&mut parsed);
+        assert_eq!(parsed.log_path, log_file_path());
+    }
+
+    #[test]
+    fn sanitize_loaded_config_resets_invalid_fan_mode() {
+        let mut config = ServerConfig::default();
+        if let Some(fan) = config.fan1.as_mut() {
+            fan.mode = "turbo".into();
+        }
+        sanitize_loaded_config(&mut config);
+        assert_eq!(config.fan1.as_ref().unwrap().mode, "auto");
+        assert_eq!(
+            config.fan1.as_ref().unwrap().rampup_curve,
+            FanConfig::default_for_fan(1).rampup_curve
+        );
+    }
+
+    #[test]
+    fn sanitize_loaded_config_resets_invalid_fan_level() {
+        let mut config = ServerConfig::default();
+        config.fan1.as_mut().unwrap().level = 9;
+        sanitize_loaded_config(&mut config);
+        assert_eq!(config.fan1.as_ref().unwrap().level, 0);
+    }
+
+    #[test]
+    fn sanitize_loaded_config_keeps_valid_fixed_fan() {
+        let mut config = ServerConfig::default();
+        config.fan1.as_mut().unwrap().mode = "fixed".into();
+        config.fan1.as_mut().unwrap().level = 3;
+        sanitize_loaded_config(&mut config);
+        assert_eq!(config.fan1.as_ref().unwrap().mode, "fixed");
+        assert_eq!(config.fan1.as_ref().unwrap().level, 3);
+    }
+
+    #[test]
+    fn sanitize_loaded_config_drops_invalid_power_mode() {
+        let mut config = ServerConfig {
+            apu_power_mode: Some("turbo".into()),
+            ..ServerConfig::default()
+        };
+        sanitize_loaded_config(&mut config);
+        assert_eq!(config.apu_power_mode, None);
+    }
+
+    #[test]
     fn portable_import_accepts_valid_file() {
         let json = serde_json::to_string_pretty(&ServerConfig::default().to_portable()).unwrap();
         let parsed = PortableConfig::parse_json(&json).unwrap();
@@ -503,7 +600,7 @@ mod tests {
     fn fan_custom_name_roundtrips() {
         let mut config = ServerConfig::default();
         config.fan1.as_mut().unwrap().name = Some("  Exhaust  ".into());
-        sanitize_fan_names(&mut config);
+        sanitize_loaded_config(&mut config);
         assert_eq!(config.fan_custom_name(1).as_deref(), Some("Exhaust"));
         let json = serde_json::to_string(&config.to_portable()).unwrap();
         assert!(json.contains("Exhaust"));

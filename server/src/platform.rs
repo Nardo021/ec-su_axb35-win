@@ -7,7 +7,9 @@ use std::mem;
 
 use winapi::shared::minwindef::{DWORD, HKEY};
 use winapi::shared::windef::HWND;
-use winapi::shared::winerror::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+use winapi::shared::winerror::{
+    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS,
+};
 use winapi::um::commdlg::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
     OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
@@ -26,7 +28,7 @@ use winapi::um::sysinfoapi::{ComputerNameDnsHostname, GetComputerNameExW};
 use winapi::um::winbase::WAIT_OBJECT_0;
 use winapi::um::winnls::GetACP;
 use winapi::um::winnt::{
-    HANDLE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, REG_SZ, SYNCHRONIZE,
+    HANDLE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, SYNCHRONIZE,
     TOKEN_ELEVATION, TOKEN_QUERY,
 };
 use winapi::um::winreg::{
@@ -35,7 +37,9 @@ use winapi::um::winreg::{
 };
 use winapi::um::winuser::SW_SHOWNORMAL;
 
+use crate::harden::{normalize_exe_path, path_is_under_program_files, system_directory};
 use crate::hardware::read_reg_string;
+use crate::i18n::{t, Language};
 
 const WAIT_ABANDONED: DWORD = 0x00000080;
 const ACCESS_EC_TIMEOUT_MS: DWORD = 5_000;
@@ -313,39 +317,56 @@ pub fn signal_reload_fans() -> bool {
 unsafe impl Sync for InstanceGuard {}
 
 pub fn current_exe_path() -> Result<String, String> {
-    let mut buffer = [0u16; 260];
-    let length =
-        unsafe { GetModuleFileNameW(ptr::null_mut(), buffer.as_mut_ptr(), buffer.len() as u32) };
-    if length == 0 {
-        return Err("Failed to get executable path".to_string());
+    unsafe {
+        let mut buffer = vec![0u16; 32_768];
+        let length = GetModuleFileNameW(ptr::null_mut(), buffer.as_mut_ptr(), buffer.len() as u32);
+        if length == 0 {
+            return Err("Failed to get executable path".to_string());
+        }
+        if length as usize == buffer.len() && GetLastError() == ERROR_INSUFFICIENT_BUFFER {
+            return Err("Executable path is too long".to_string());
+        }
+        Ok(String::from_utf16_lossy(&buffer[..length as usize]))
     }
-    Ok(String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
 pub fn is_start_with_windows() -> bool {
-    if scheduled_task_registered() {
+    logon_task_matches_current_exe()
+}
+
+pub fn reconcile_start_with_windows() -> bool {
+    if is_start_with_windows() {
+        let _ = remove_legacy_run_entries();
         return true;
     }
+    let _ = run_schtasks(&schtasks_delete_args());
+    let _ = remove_legacy_run_entries();
+    false
+}
+
+fn logon_task_matches_current_exe() -> bool {
+    let Ok(output) = run_schtasks(&schtasks_query_xml_args()) else {
+        return false;
+    };
+    if !output.success {
+        return false;
+    }
+    let Some(command) = parse_schtasks_command(&output.message) else {
+        return false;
+    };
     let Ok(exe) = current_exe_path() else {
         return false;
     };
-    for stored in [
-        read_run_value(HKEY_CURRENT_USER),
-        read_run_value(HKEY_LOCAL_MACHINE),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if run_value_matches(&stored, &exe) {
-            return true;
-        }
-    }
-    false
+    path_is_under_program_files(&command)
+        && normalize_exe_path(&command).eq_ignore_ascii_case(&normalize_exe_path(&exe))
 }
 
 pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     if enabled {
         let exe = current_exe_path()?;
+        if !path_is_under_program_files(&exe) {
+            return Err(t(current_ui_language(), "autostart_needs_install").to_string());
+        }
         let output = run_schtasks(&schtasks_create_args(&exe))?;
         if !output.success {
             return Err(format!(
@@ -372,6 +393,7 @@ pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run_value_matches(stored: &str, exe_path: &str) -> bool {
     normalize_run_path(stored).eq_ignore_ascii_case(&normalize_run_path(exe_path))
 }
@@ -406,6 +428,29 @@ pub(crate) fn schtasks_delete_args() -> Vec<String> {
 
 pub(crate) fn schtasks_query_args() -> Vec<String> {
     vec!["/Query".into(), "/TN".into(), STARTUP_TASK_NAME.into()]
+}
+
+pub(crate) fn schtasks_query_xml_args() -> Vec<String> {
+    vec![
+        "/Query".into(),
+        "/TN".into(),
+        STARTUP_TASK_NAME.into(),
+        "/XML".into(),
+    ]
+}
+
+pub(crate) fn parse_schtasks_command(xml: &str) -> Option<String> {
+    let lower = xml.to_ascii_lowercase();
+    let start = lower.find("<command>")?;
+    let rest = xml.get(start + 9..)?;
+    let rest_lower = rest.to_ascii_lowercase();
+    let end = rest_lower.find("</command>")?;
+    let raw = rest[..end].trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.trim_matches('"').to_string())
+    }
 }
 
 pub(crate) fn should_report_logon_remove_failure(_delete_ok: bool, still_registered: bool) -> bool {
@@ -460,6 +505,7 @@ pub(crate) fn schtasks_missing_task(message: &str) -> bool {
         || message.contains("不存在")
 }
 
+#[cfg(test)]
 fn normalize_run_path(value: &str) -> String {
     value.trim().trim_matches('"').to_string()
 }
@@ -511,57 +557,6 @@ fn delete_named_value(root: HKEY, subkey: &str, name: &str, access: u32) -> Resu
     }
 }
 
-fn read_run_value(root: HKEY) -> Option<String> {
-    let key_w = wide(RUN_KEY);
-    let name_w = wide(RUN_VALUE);
-    let mut key = ptr::null_mut();
-    let access = if std::ptr::eq(root, HKEY_LOCAL_MACHINE) {
-        KEY_READ | KEY_WOW64_64KEY
-    } else {
-        KEY_READ
-    };
-    if unsafe { RegOpenKeyExW(root, key_w.as_ptr(), 0, access, &mut key) } != ERROR_SUCCESS as i32 {
-        return None;
-    }
-    let mut kind: DWORD = 0;
-    let mut size: DWORD = 0;
-    if unsafe {
-        RegQueryValueExW(
-            key,
-            name_w.as_ptr(),
-            ptr::null_mut(),
-            &mut kind,
-            ptr::null_mut(),
-            &mut size,
-        )
-    } != ERROR_SUCCESS as i32
-        || kind != REG_SZ
-    {
-        unsafe { RegCloseKey(key) };
-        return None;
-    }
-    let mut buffer = vec![0u8; size as usize];
-    let status = unsafe {
-        RegQueryValueExW(
-            key,
-            name_w.as_ptr(),
-            ptr::null_mut(),
-            &mut kind,
-            buffer.as_mut_ptr(),
-            &mut size,
-        )
-    };
-    unsafe { RegCloseKey(key) };
-    if status != ERROR_SUCCESS as i32 {
-        return None;
-    }
-    let words =
-        unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u16, (size as usize) / 2) };
-    Some(normalize_run_path(
-        String::from_utf16_lossy(words).trim_end_matches('\0'),
-    ))
-}
-
 struct SchtasksOutput {
     success: bool,
     message: String,
@@ -589,8 +584,13 @@ fn run_schtasks(args: &[String]) -> Result<SchtasksOutput, String> {
 }
 
 fn schtasks_exe() -> String {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
-    format!(r"{windir}\System32\schtasks.exe")
+    format!("{}\\schtasks.exe", system_directory())
+}
+
+fn current_ui_language() -> Language {
+    crate::config::ServerConfig::load()
+        .map(|config| config.language())
+        .unwrap_or(Language::En)
 }
 
 pub fn shell_open(path: &str) {
@@ -762,6 +762,32 @@ mod tests {
         assert!(registry_delete_succeeded(ERROR_SUCCESS as i32));
         assert!(registry_delete_succeeded(ERROR_FILE_NOT_FOUND as i32));
         assert!(!registry_delete_succeeded(5));
+    }
+
+    #[test]
+    fn parse_schtasks_command_reads_quoted_path() {
+        let xml = r#"
+            <Task>
+              <Actions>
+                <Exec>
+                  <Command>"C:\Program Files\ec-su_axb35-win\evox2-control.exe"</Command>
+                </Exec>
+              </Actions>
+            </Task>
+        "#;
+        assert_eq!(
+            parse_schtasks_command(xml).as_deref(),
+            Some(r"C:\Program Files\ec-su_axb35-win\evox2-control.exe")
+        );
+    }
+
+    #[test]
+    fn parse_schtasks_command_reads_unquoted_path() {
+        let xml = r"<Command>C:\Program Files\ec-su_axb35-win\evox2-control.exe</Command>";
+        assert_eq!(
+            parse_schtasks_command(xml).as_deref(),
+            Some(r"C:\Program Files\ec-su_axb35-win\evox2-control.exe")
+        );
     }
 
     #[test]

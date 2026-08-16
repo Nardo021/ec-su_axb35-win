@@ -12,7 +12,9 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 use winapi::shared::minwindef::HMODULE;
-use winapi::um::libloaderapi::{GetProcAddress, LoadLibraryW};
+use winapi::um::libloaderapi::GetProcAddress;
+
+use crate::harden::load_system32_library;
 
 const AMD_VENDOR_ID: u32 = 0x1002;
 const KMTQAITYPE_ADAPTERTYPE: i32 = 15;
@@ -268,7 +270,7 @@ fn wddm_api() -> Option<&'static WddmApi> {
 
 fn load_wddm_api() -> Option<WddmApi> {
     unsafe {
-        let module = LoadLibraryW(wide("gdi32.dll").as_ptr());
+        let module = load_system32_library("gdi32.dll");
         if module.is_null() {
             return None;
         }
@@ -423,7 +425,7 @@ fn adl_api() -> Option<&'static Mutex<AdlApi>> {
 
 fn load_adl_api() -> Option<Mutex<AdlApi>> {
     unsafe {
-        let module = LoadLibraryW(wide("atiadlxx.dll").as_ptr());
+        let module = load_system32_library("atiadlxx.dll");
         if module.is_null() {
             return None;
         }
@@ -558,10 +560,6 @@ unsafe fn load_fn<T: Copy>(module: HMODULE, name: &[u8]) -> Option<T> {
         return None;
     }
     Some(std::mem::transmute_copy::<_, T>(&symbol))
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]

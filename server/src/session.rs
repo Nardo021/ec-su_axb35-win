@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::config::{FanConfig, ServerConfig};
+use crate::config::{log_file_path, FanConfig, ServerConfig};
 use crate::ec::{format_firmware_version, EcController, EcOperation, EcResult};
 use crate::hardware::HardwareIdentity;
 use crate::logger::Logger;
@@ -85,9 +85,8 @@ impl AppSession {
         let logger = if options.quiet {
             Arc::new(Mutex::new(Logger::silent()))
         } else {
-            let config_guard = config.lock().unwrap();
             Arc::new(Mutex::new(Logger::new(
-                &config_guard.log_path,
+                &log_file_path(),
                 options.service_mode,
             )?))
         };

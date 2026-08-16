@@ -5,6 +5,30 @@ All notable changes to ec-su_axb35-win are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] - 2026-08-16
+
+Local privilege-escalation hardening. Fan and curve behavior is unchanged.
+
+### Security
+
+- `config.json` `log_path` is ignored. The log is always
+  `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\server.log`. Invalid fan or
+  power-mode values in the file are reset instead of being written to the EC.
+- That ProgramData folder is re-ACL'd to SYSTEM and Administrators only
+  (no inherited Users write).
+- `schtasks.exe` is taken from `GetSystemDirectoryW`, not `%WINDIR%`.
+- Start with Windows only registers an ONLOGON / Highest task when the
+  program lives under Program Files. A portable or `dist\` copy refuses
+  the setting and deletes an existing unsafe `EVO-X2 Control` task.
+- AMD ADL / `gdi32` load from System32 only. The process also restricts
+  the default DLL search path to System32.
+- The installer removes the logon task on install and uninstall.
+
+### Changed
+
+- Portable zip builds can no longer enable Start with Windows. Use the
+  installer if you want the logon task.
+
 ## [2.5.0] - 2026-08-16
 
 Curve mode in the window is a five-row ramp-up table. Ramp-down is
@@ -134,6 +158,7 @@ changed enough to warrant a minor bump rather than 2.0.1.
 First PawnIO release: one window plus tray, no Windows service, Secure Boot
 can stay enabled. See the GitHub Release for that tag.
 
+[2.5.1]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.3.1...v2.4.0
 [2.3.1]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.3.0...v2.3.1

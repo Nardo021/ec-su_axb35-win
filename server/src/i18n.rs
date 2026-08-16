@@ -84,6 +84,12 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "close_quit") => "Quit the program",
         (Language::Zh, "start_with_windows") => "开机时启动",
         (Language::En, "start_with_windows") => "Start with Windows",
+        (Language::Zh, "autostart_needs_install") => {
+            "开机启动仅支持安装到 Program Files 的版本。请使用安装包。"
+        }
+        (Language::En, "autostart_needs_install") => {
+            "Start with Windows is only available for the Program Files install. Use the installer."
+        }
         (Language::Zh, "language") => "语言",
         (Language::En, "language") => "Language",
         (Language::Zh, "lang_zh") => "中文",
@@ -306,5 +312,7 @@ mod tests {
             "改升档温度；右侧是自动降档（约低 8°C）。"
         );
         assert!(t(Language::En, "hint_curve").contains("8°C"));
+        assert!(t(Language::Zh, "autostart_needs_install").contains("Program Files"));
+        assert!(t(Language::En, "autostart_needs_install").contains("Program Files"));
     }
 }

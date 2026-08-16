@@ -15,7 +15,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::alert::{should_fire_temp_alert, TEMP_ALERT_MAX, TEMP_ALERT_MIN};
 use crate::config::{
-    program_data_dir, FanConfig, PortableConfig, SMOOTHING_WINDOW_MAX, SMOOTHING_WINDOW_MIN,
+    log_file_path, program_data_dir, FanConfig, PortableConfig, SMOOTHING_WINDOW_MAX,
+    SMOOTHING_WINDOW_MIN,
 };
 use crate::curve::{clamp_rampup_point, derive_rampdown, CURVE_TEMP_MAX};
 use crate::diagnose::{DiagnoseReport, AUTHOR, REPO_URL, UPSTREAM_URL};
@@ -490,8 +491,7 @@ fn install_windows_fonts(ctx: &egui::Context) {
 }
 
 fn load_font_bytes(names: &[&str]) -> Option<Vec<u8>> {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let fonts = std::path::Path::new(&windir).join("Fonts");
+    let fonts = std::path::Path::new(&crate::harden::windows_directory()).join("Fonts");
     for name in names {
         if let Ok(bytes) = std::fs::read(fonts.join(name)) {
             if !bytes.is_empty() {
@@ -503,8 +503,7 @@ fn load_font_bytes(names: &[&str]) -> Option<Vec<u8>> {
 }
 
 fn load_cjk_font_bytes() -> Option<Vec<u8>> {
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let fonts = std::path::Path::new(&windir).join("Fonts");
+    let fonts = std::path::Path::new(&crate::harden::windows_directory()).join("Fonts");
     for name in [
         "msyh.ttc",
         "msyh.ttf",
@@ -1251,8 +1250,7 @@ fn draw_settings(
                 .add_sized([width, 28.0], egui::Button::new(t(lang, "open_log")))
                 .clicked()
             {
-                let path = state.session.config.lock().unwrap().log_path.clone();
-                shell_open(&path);
+                shell_open(&log_file_path());
             }
             if ui
                 .add_sized([width, 28.0], egui::Button::new(t(lang, "open_log_dir")))
@@ -1380,8 +1378,7 @@ fn draw_diagnostics(
                 ctx.copy_text(text.clone());
             }
             if ui.button(t(lang, "open_log")).clicked() {
-                let path = state.session.config.lock().unwrap().log_path.clone();
-                shell_open(&path);
+                shell_open(&log_file_path());
             }
             if ui.button(t(lang, "open_log_dir")).clicked() {
                 shell_open(&program_data_dir());

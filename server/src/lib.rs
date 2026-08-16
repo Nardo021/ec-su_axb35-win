@@ -16,6 +16,7 @@ mod ec;
 mod ec_io;
 mod fan;
 mod gui;
+mod harden;
 mod hardware;
 mod i18n;
 mod logger;
@@ -32,6 +33,7 @@ use platform::ALREADY_RUNNING;
 use session::{AppSession, StartOptions};
 
 pub fn entry() {
+    crate::harden::restrict_dll_search();
     let args = Args::parse();
 
     if let Some(command) = args.command {
@@ -113,7 +115,7 @@ fn current_language() -> Language {
 }
 
 fn sync_start_with_windows(session: &AppSession) {
-    let actual = platform::is_start_with_windows();
+    let actual = platform::reconcile_start_with_windows();
     let mut config = session.config.lock().unwrap();
     if config.start_with_windows == actual {
         return;
