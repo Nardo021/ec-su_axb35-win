@@ -14,6 +14,9 @@ This application does not require Secure Boot to be disabled.
 
 See [docs/PAWNIO_MIGRATION.md](docs/PAWNIO_MIGRATION.md) for the driver change.
 
+**Download the latest release, currently [v2.3.0](https://github.com/Nardo021/ec-su_axb35-win/releases/latest).**
+Most people should take `ec-su_axb35-win-installer-2.3.0.exe`. See [Download](#download).
+
 ## Requirements
 
 - GMKtec EVO-X2 / Sixunited AXB35 hardware
@@ -25,15 +28,44 @@ See [docs/PAWNIO_MIGRATION.md](docs/PAWNIO_MIGRATION.md) for the driver change.
 Secure Boot, Test Signing, and Memory Integrity/HVCI can stay in their default
 secure configuration.
 
+## Download
+
+Use the **latest** GitHub Release (currently **v2.3.0**):
+
+https://github.com/Nardo021/ec-su_axb35-win/releases/latest
+
+Do not use older tags on this repo. Do not use upstream
+[deseven/ec-su_axb35-win](https://github.com/deseven/ec-su_axb35-win) builds;
+those still rely on WinRing0.
+
+| File on the release page | Who it is for |
+| --- | --- |
+| `ec-su_axb35-win-installer-2.3.0.exe` | Normal install. **Download this** unless you have a reason not to. |
+| `evox2-control-v2.3.0.zip` | Portable copy: GUI and CLI in one folder. |
+| `evox2-control.exe` | Window and tray only. Same program as the CLI binary. |
+| `evox2ctl.exe` | Command line only. Same program as `evox2-control.exe`, renamed. |
+| Source code (zip / tar.gz) | Source for building. **Not** a Windows app. Skip this. |
+
+PawnIO is not in any of those files. Install it from https://pawnio.eu/ first.
+
+### 中文：该下哪个
+
+请下 **最新版 v2.3.0**（页面上标 Latest 的那一条），不要下 v2.2.0 及更早，也不要下上游 WinRing0 版本。
+
+- 一般用户：下载 `ec-su_axb35-win-installer-2.3.0.exe`，以管理员身份运行。
+- 不想安装：下载 `evox2-control-v2.3.0.zip`，解压后双击 `evox2-control.exe`。
+- 不要下 GitHub 自动生成的 `Source code` 压缩包，那是源码，不能直接运行。
+- 驱动请另装官方 PawnIO：https://pawnio.eu/
+
 ## Installation
 
 1. Install the official PawnIO release from https://pawnio.eu/.
-2. Download the latest [GitHub Release](https://github.com/Nardo021/ec-su_axb35-win/releases),
-   run `ec-su_axb35-win-installer-2.3.0.exe` as Administrator, or copy the
-   binaries from `dist/`. Windows may show a SmartScreen warning until the
-   binaries are Authenticode-signed; this project does not ship a self-signed
-   certificate. The GUI and `evox2ctl` both request Administrator rights
-   (UAC) because EC access through PawnIO requires elevation.
+2. Download the file named in [Download](#download). Run the installer as
+   Administrator, or unpack the zip / copy the binaries from `dist/`. Windows
+   may show a SmartScreen warning until the binaries are Authenticode-signed;
+   this project does not ship a self-signed certificate. The GUI and
+   `evox2ctl` both request Administrator rights (UAC) because EC access
+   through PawnIO requires elevation.
 3. Double-click `evox2-control.exe`. That is the only program you need.
 4. Closing the window hides it to the tray by default. Curve monitoring keeps
    running. Use the tray menu or Settings to quit. Power mode and fan settings
