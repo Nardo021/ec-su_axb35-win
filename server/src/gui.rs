@@ -14,14 +14,17 @@ use image::GenericImageView;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::alert::{should_fire_temp_alert, TEMP_ALERT_MAX, TEMP_ALERT_MIN};
-use crate::config::{program_data_dir, PortableConfig, SMOOTHING_WINDOW_MAX, SMOOTHING_WINDOW_MIN};
+use crate::config::{
+    program_data_dir, FanConfig, PortableConfig, SMOOTHING_WINDOW_MAX, SMOOTHING_WINDOW_MIN,
+};
+use crate::curve::{clamp_rampup_point, derive_rampdown, CURVE_TEMP_MAX};
 use crate::diagnose::{DiagnoseReport, AUTHOR, REPO_URL, UPSTREAM_URL};
 use crate::fan;
 use crate::i18n::{t, Language};
 use crate::platform::{
     host_name, pick_json_file, set_start_with_windows, shell_open, ui_chrome, UiChrome,
 };
-use crate::session::{AppSession, FanSnapshot, MetricsSnapshot};
+use crate::session::{AppSession, MetricsSnapshot};
 use crate::thermal::TemperatureSource;
 use crate::tray::TrayEvent;
 
@@ -148,8 +151,9 @@ struct EditState {
     fan_applying: [bool; 3],
     temp_fan_level: [i32; 3],
     dragging_level: [bool; 3],
-    temp_fan_rampup: [String; 3],
-    temp_fan_rampdown: [String; 3],
+    temp_fan_rampup: [[u8; 5]; 3],
+    temp_fan_rampdown: [[u8; 5]; 3],
+    dragging_curve: [bool; 3],
     curve_dirty: [bool; 3],
     renaming_fan: [bool; 3],
     temp_fan_name: [String; 3],
@@ -165,15 +169,16 @@ impl Default for EditState {
             temp_fan_level: [0, 0, 0],
             dragging_level: [false; 3],
             temp_fan_rampup: [
-                "60,70,83,95,97".into(),
-                "60,70,83,95,97".into(),
-                "20,60,83,95,97".into(),
+                [60, 70, 83, 95, 97],
+                [60, 70, 83, 95, 97],
+                [20, 60, 83, 95, 97],
             ],
             temp_fan_rampdown: [
-                "40,50,80,94,96".into(),
-                "40,50,80,94,96".into(),
-                "0,50,80,94,96".into(),
+                [40, 50, 80, 94, 96],
+                [40, 50, 80, 94, 96],
+                [0, 50, 80, 94, 96],
             ],
+            dragging_curve: [false; 3],
             curve_dirty: [false; 3],
             renaming_fan: [false; 3],
             temp_fan_name: [String::new(), String::new(), String::new()],
@@ -918,9 +923,12 @@ fn draw_fan(
     if !state.edit.dragging_level[index] {
         state.edit.temp_fan_level[index] = i32::from(fan.level);
     }
-    if !state.edit.curve_dirty[index] {
-        state.edit.temp_fan_rampup[index] = join_curve(&fan.rampup_curve);
-        state.edit.temp_fan_rampdown[index] = join_curve(&fan.rampdown_curve);
+    if !state.edit.dragging_curve[index]
+        && !state.edit.fan_applying[index]
+        && !state.edit.curve_dirty[index]
+    {
+        state.edit.temp_fan_rampup[index] = fan.rampup_curve;
+        state.edit.temp_fan_rampdown[index] = fan.rampdown_curve;
     }
     let applying = state.edit.fan_applying[index];
 
@@ -1028,36 +1036,27 @@ fn draw_fan(
         }
         if fan.mode == "curve" {
             ui.add_space(6.0);
+            draw_curve_table(ui, lang, theme, index, fan.level, applying, state, shared);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(t(lang, "ramp_up")).color(theme.muted));
-                ui.add_enabled_ui(!applying, |ui| {
-                    let response = ui.text_edit_singleline(&mut state.edit.temp_fan_rampup[index]);
-                    if response.changed() {
-                        state.edit.curve_dirty[index] = true;
-                    }
-                    if response.lost_focus() && state.edit.curve_dirty[index] {
-                        commit_fan_curve(state, shared, index, fan);
-                    }
-                });
+                ui.label(
+                    RichText::new(t(lang, "hint_curve"))
+                        .small()
+                        .color(theme.muted),
+                );
+                let defaults = FanConfig::default_for_fan((index + 1) as u8);
+                let is_default = state.edit.temp_fan_rampup[index] == defaults.rampup_curve
+                    && state.edit.temp_fan_rampdown[index] == defaults.rampdown_curve;
+                if !is_default {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_enabled_ui(!applying, |ui| {
+                            if ui.small_button(t(lang, "restore_default")).clicked() {
+                                restore_fan_curve(state, shared, index, fan.level);
+                            }
+                        });
+                    });
+                }
             });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(t(lang, "ramp_down")).color(theme.muted));
-                ui.add_enabled_ui(!applying, |ui| {
-                    let response =
-                        ui.text_edit_singleline(&mut state.edit.temp_fan_rampdown[index]);
-                    if response.changed() {
-                        state.edit.curve_dirty[index] = true;
-                    }
-                    if response.lost_focus() && state.edit.curve_dirty[index] {
-                        commit_fan_curve(state, shared, index, fan);
-                    }
-                });
-            });
-            ui.label(
-                RichText::new(t(lang, "hint_curve"))
-                    .small()
-                    .color(theme.muted),
-            );
         }
         ui.add_space(8.0);
         let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width(), 28.0));
@@ -1629,6 +1628,22 @@ fn apply_power(state: &mut UiState, shared: &Arc<Mutex<UiState>>, mode: String) 
     });
 }
 
+fn restore_fan_curve(state: &mut UiState, shared: &Arc<Mutex<UiState>>, index: usize, level: u8) {
+    let defaults = FanConfig::default_for_fan((index + 1) as u8);
+    state.edit.temp_fan_rampup[index] = defaults.rampup_curve;
+    state.edit.temp_fan_rampdown[index] = defaults.rampdown_curve;
+    state.edit.curve_dirty[index] = true;
+    apply_fan(
+        state,
+        shared,
+        index,
+        "curve".into(),
+        level,
+        Some(defaults.rampup_curve),
+        Some(defaults.rampdown_curve),
+    );
+}
+
 fn apply_fan(
     state: &mut UiState,
     shared: &Arc<Mutex<UiState>>,
@@ -1640,6 +1655,7 @@ fn apply_fan(
 ) {
     state.edit.fan_applying[index] = true;
     state.edit.dragging_level[index] = false;
+    state.edit.dragging_curve[index] = false;
     let session = Arc::clone(&state.session);
     let shared = Arc::clone(shared);
     thread::spawn(move || {
@@ -1659,38 +1675,6 @@ fn apply_fan(
         }
         ui.edit.fan_applying[index] = false;
     });
-}
-
-fn commit_fan_curve(
-    state: &mut UiState,
-    shared: &Arc<Mutex<UiState>>,
-    index: usize,
-    fan: &FanSnapshot,
-) {
-    let lang = state.session.config.lock().unwrap().language();
-    let rampup = parse_curve(&state.edit.temp_fan_rampup[index]);
-    let rampdown = parse_curve(&state.edit.temp_fan_rampdown[index]);
-    match (rampup, rampdown) {
-        (Some(rampup), Some(rampdown)) => {
-            apply_fan(
-                state,
-                shared,
-                index,
-                "curve".into(),
-                fan.level,
-                Some(rampup),
-                Some(rampdown),
-            );
-        }
-        (None, _) => {
-            state.error = Some(t(lang, "error_rampup").to_string());
-            state.error_at = Some(Instant::now());
-        }
-        (_, None) => {
-            state.error = Some(t(lang, "error_rampdown").to_string());
-            state.error_at = Some(Instant::now());
-        }
-    }
 }
 
 fn settings_row(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
@@ -1813,6 +1797,102 @@ fn toggle_switch(ui: &mut egui::Ui, theme: &Theme, on: &mut bool) -> egui::Respo
     response
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_curve_table(
+    ui: &mut egui::Ui,
+    lang: Language,
+    theme: &Theme,
+    index: usize,
+    current_level: u8,
+    applying: bool,
+    state: &mut UiState,
+    shared: &Arc<Mutex<UiState>>,
+) {
+    let mut any_dragged = false;
+    let mut should_commit = false;
+    ui.add_enabled_ui(!applying, |ui| {
+        egui::Grid::new(format!("curve_table_{index}"))
+            .num_columns(3)
+            .spacing([8.0, 4.0])
+            .min_col_width(52.0)
+            .show(ui, |ui| {
+                ui.label(RichText::new(t(lang, "level")).small().color(theme.muted));
+                ui.label(RichText::new(t(lang, "ramp_up")).small().color(theme.muted));
+                ui.label(
+                    RichText::new(t(lang, "ramp_down"))
+                        .small()
+                        .color(theme.muted),
+                );
+                ui.end_row();
+
+                for point in 0..5 {
+                    ui.label(
+                        RichText::new(format!("{point}\u{2192}{}", point + 1)).color(theme.muted),
+                    );
+                    let mut value = i32::from(state.edit.temp_fan_rampup[index][point]);
+                    let min = if point == 0 {
+                        0
+                    } else {
+                        i32::from(state.edit.temp_fan_rampup[index][point - 1]) + 1
+                    };
+                    let max = if point + 1 >= 5 {
+                        i32::from(CURVE_TEMP_MAX)
+                    } else {
+                        i32::from(state.edit.temp_fan_rampup[index][point + 1]).saturating_sub(1)
+                    };
+                    let (lo, hi) = if min > max {
+                        (value, value)
+                    } else {
+                        (min, max)
+                    };
+                    let response = ui.add(
+                        egui::DragValue::new(&mut value)
+                            .range(lo..=hi)
+                            .suffix("\u{00B0}C")
+                            .speed(1.0),
+                    );
+                    if response.changed() {
+                        let next = clamp_rampup_point(
+                            state.edit.temp_fan_rampup[index],
+                            point,
+                            u8::try_from(value.clamp(0, i32::from(CURVE_TEMP_MAX)))
+                                .unwrap_or(CURVE_TEMP_MAX),
+                        );
+                        if next != state.edit.temp_fan_rampup[index] {
+                            state.edit.temp_fan_rampup[index] = next;
+                            state.edit.temp_fan_rampdown[index] = derive_rampdown(&next);
+                            state.edit.curve_dirty[index] = true;
+                        }
+                    }
+                    if response.dragged() {
+                        any_dragged = true;
+                    }
+                    if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                        should_commit = true;
+                    }
+                    let down = state.edit.temp_fan_rampdown[index][point];
+                    ui.label(RichText::new(format!("\u{2193} {down}\u{00B0}C")).color(theme.muted));
+                    ui.end_row();
+                }
+            });
+    });
+    state.edit.dragging_curve[index] = any_dragged;
+    if should_commit && !any_dragged && state.edit.curve_dirty[index] {
+        let rampup = state.edit.temp_fan_rampup[index];
+        let rampdown = derive_rampdown(&rampup);
+        state.edit.temp_fan_rampdown[index] = rampdown;
+        apply_fan(
+            state,
+            shared,
+            index,
+            "curve".into(),
+            current_level,
+            Some(rampup),
+            Some(rampdown),
+        );
+    }
+}
+
 fn draw_chart(
     ui: &mut egui::Ui,
     theme: &Theme,
@@ -1929,22 +2009,6 @@ fn configure_window(app: &mut ControlApp, ctx: &egui::Context) {
     )));
     ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
     app.window_configured = true;
-}
-
-fn parse_curve(text: &str) -> Option<[u8; 5]> {
-    let values: Vec<u8> = text
-        .split(',')
-        .filter_map(|part| part.trim().parse().ok())
-        .collect();
-    values.try_into().ok()
-}
-
-fn join_curve(curve: &[u8; 5]) -> String {
-    curve
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 #[cfg(test)]

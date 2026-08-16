@@ -68,8 +68,10 @@ pub fn t(language: Language, key: &str) -> &str {
         (Language::En, "ramp_up") => "Ramp-Up:",
         (Language::Zh, "ramp_down") => "降温曲线：",
         (Language::En, "ramp_down") => "Ramp-Down:",
-        (Language::Zh, "hint_curve") => "提示：5 个温度阈值（°C），用逗号分隔。",
-        (Language::En, "hint_curve") => "Hint: 5 temperature thresholds (°C), comma separated.",
+        (Language::Zh, "hint_curve") => "改升档温度；右侧是自动降档（约低 8°C）。",
+        (Language::En, "hint_curve") => {
+            "Edit ramp-up temperatures. The right column is automatic ramp-down (about 8°C lower)."
+        }
         (Language::Zh, "settings") => "设置",
         (Language::En, "settings") => "Settings",
         (Language::Zh, "back") => "返回",
@@ -299,5 +301,10 @@ mod tests {
             t(Language::Zh, "curve_needs_gui"),
             "曲线模式需要正在运行的窗口（evox2-control）。请用图形界面设置，或改用 auto / fixed。"
         );
+        assert_eq!(
+            t(Language::Zh, "hint_curve"),
+            "改升档温度；右侧是自动降档（约低 8°C）。"
+        );
+        assert!(t(Language::En, "hint_curve").contains("8°C"));
     }
 }

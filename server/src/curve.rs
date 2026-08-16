@@ -20,6 +20,51 @@ pub fn next_fan_level(current: u8, temp: u8, rampup: &[u8; 5], rampdown: &[u8; 5
     }
 }
 
+pub const RAMPDOWN_GAP_C: u8 = 8;
+pub const CURVE_TEMP_MAX: u8 = 100;
+
+pub fn derive_rampdown(rampup: &[u8; 5]) -> [u8; 5] {
+    let mut down = [0u8; 5];
+    for (index, &up) in rampup.iter().enumerate() {
+        let derived = if up == 0 {
+            0
+        } else {
+            up.saturating_sub(RAMPDOWN_GAP_C).min(up - 1)
+        };
+        let floor = if index == 0 { 0 } else { down[index - 1] };
+        let mut value = derived.max(floor);
+        if up > 0 && value >= up {
+            value = up - 1;
+        }
+        if index > 0 && value < down[index - 1] {
+            value = down[index - 1].min(if up == 0 { 0 } else { up - 1 });
+        }
+        down[index] = value;
+    }
+    down
+}
+
+pub fn clamp_rampup_point(mut rampup: [u8; 5], index: usize, temp: u8) -> [u8; 5] {
+    if index >= rampup.len() {
+        return rampup;
+    }
+    let min = if index == 0 {
+        0
+    } else {
+        rampup[index - 1].saturating_add(1)
+    };
+    let max = if index + 1 >= rampup.len() {
+        CURVE_TEMP_MAX
+    } else {
+        rampup[index + 1].saturating_sub(1)
+    };
+    if min > max {
+        return rampup;
+    }
+    rampup[index] = temp.clamp(min, max);
+    rampup
+}
+
 pub fn push_temp_sample(window: &mut VecDeque<u8>, temp: u8, max_len: u8) {
     let max_len = usize::from(max_len.max(1));
     window.push_back(temp);
@@ -64,5 +109,31 @@ mod tests {
         assert_eq!(window.iter().copied().collect::<Vec<_>>(), vec![20, 30, 40]);
         push_temp_sample(&mut window, 50, 1);
         assert_eq!(window.iter().copied().collect::<Vec<_>>(), vec![50]);
+    }
+
+    #[test]
+    fn derive_rampdown_subtracts_gap() {
+        assert_eq!(derive_rampdown(&[60, 70, 83, 95, 97]), [52, 62, 75, 87, 89]);
+    }
+
+    #[test]
+    fn derive_rampdown_tight_curve_stays_below_and_nondecreasing() {
+        let rampup = [20, 21, 22, 23, 24];
+        let rampdown = derive_rampdown(&rampup);
+        for index in 0..5 {
+            assert!(rampdown[index] < rampup[index]);
+            if index > 0 {
+                assert!(rampdown[index] >= rampdown[index - 1]);
+            }
+        }
+    }
+
+    #[test]
+    fn clamp_rampup_point_cannot_cross_neighbors() {
+        let rampup = [20, 50, 80, 90, 95];
+        assert_eq!(clamp_rampup_point(rampup, 1, 10)[1], 21);
+        assert_eq!(clamp_rampup_point(rampup, 1, 90)[1], 79);
+        assert_eq!(clamp_rampup_point(rampup, 0, 200)[0], 49);
+        assert_eq!(clamp_rampup_point(rampup, 4, 0)[4], 91);
     }
 }

@@ -5,6 +5,21 @@ All notable changes to ec-su_axb35-win are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-08-16
+
+Curve mode in the window is a five-row ramp-up table. Ramp-down is
+derived automatically (about 8°C below) and shown read-only.
+
+### Changed
+
+- Fan cards no longer use comma-separated temperature fields or a
+  staircase chart. Edit five ramp-up thresholds (0→1 … 4→5). Ramp-down
+  is derived automatically (8°C lower, still below each ramp-up point)
+  and written on pointer-up. Until a fan is edited, the stored
+  ramp-down from `config.json` is shown in the read-only column.
+- CLI `evox2ctl fan … curve` still takes two 5-value lists.
+- Curve mode can restore the stock ramp-up and ramp-down for that fan.
+
 ## [2.4.0] - 2026-08-16
 
 Curve mode no longer leaves fans stuck on a software level after the
@@ -119,6 +134,7 @@ changed enough to warrant a minor bump rather than 2.0.1.
 First PawnIO release: one window plus tray, no Windows service, Secure Boot
 can stay enabled. See the GitHub Release for that tag.
 
+[2.5.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.3.1...v2.4.0
 [2.3.1]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.2.0...v2.3.0

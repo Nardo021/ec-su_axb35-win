@@ -31,12 +31,27 @@ pub struct FanConfig {
 
 impl Default for FanConfig {
     fn default() -> Self {
-        FanConfig {
-            mode: "auto".to_string(),
-            level: 0,
-            rampup_curve: [60, 70, 83, 95, 97],
-            rampdown_curve: [40, 50, 80, 94, 96],
-            name: None,
+        Self::default_for_fan(1)
+    }
+}
+
+impl FanConfig {
+    pub fn default_for_fan(fan_id: u8) -> Self {
+        match fan_id {
+            3 => FanConfig {
+                mode: "auto".to_string(),
+                level: 0,
+                rampup_curve: [20, 60, 83, 95, 97],
+                rampdown_curve: [0, 50, 80, 94, 96],
+                name: None,
+            },
+            _ => FanConfig {
+                mode: "auto".to_string(),
+                level: 0,
+                rampup_curve: [60, 70, 83, 95, 97],
+                rampdown_curve: [40, 50, 80, 94, 96],
+                name: None,
+            },
         }
     }
 }
@@ -109,20 +124,14 @@ pub struct PortableConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        let fan3_config = FanConfig {
-            rampup_curve: [20, 60, 83, 95, 97],
-            rampdown_curve: [0, 50, 80, 94, 96],
-            ..FanConfig::default()
-        };
-
         ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 8395,
             log_path: format!("{}\\server.log", program_data_dir()),
             apu_power_mode: None,
-            fan1: Some(FanConfig::default()),
-            fan2: Some(FanConfig::default()),
-            fan3: Some(fan3_config),
+            fan1: Some(FanConfig::default_for_fan(1)),
+            fan2: Some(FanConfig::default_for_fan(2)),
+            fan3: Some(FanConfig::default_for_fan(3)),
             close_to_tray: true,
             start_with_windows: false,
             language: default_language(),
@@ -343,6 +352,20 @@ fn sanitize_fan_names(config: &mut ServerConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_for_fan_matches_stock_curves() {
+        let fan1 = FanConfig::default_for_fan(1);
+        let fan2 = FanConfig::default_for_fan(2);
+        let fan3 = FanConfig::default_for_fan(3);
+        assert_eq!(fan1.rampup_curve, [60, 70, 83, 95, 97]);
+        assert_eq!(fan1.rampdown_curve, [40, 50, 80, 94, 96]);
+        assert_eq!(fan2.rampup_curve, fan1.rampup_curve);
+        assert_eq!(fan2.rampdown_curve, fan1.rampdown_curve);
+        assert_eq!(fan3.rampup_curve, [20, 60, 83, 95, 97]);
+        assert_eq!(fan3.rampdown_curve, [0, 50, 80, 94, 96]);
+        assert_eq!(FanConfig::default(), fan1);
+    }
 
     #[test]
     fn old_config_gets_ui_defaults() {
