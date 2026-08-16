@@ -5,6 +5,17 @@ All notable changes to ec-su_axb35-win are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-08-16
+
+Idle CPU no longer stays near 3% of the machine after the window is
+hidden to the tray.
+
+### Fixed
+
+- Closing to the tray no longer busy-spins the eframe event loop on
+  Windows. The GUI skips painting while hidden and only wakes about once
+  a second for tray events and alerts.
+
 ## [2.3.0] - 2026-08-16
 
 Selectable temperature source, custom fan names, and the original
@@ -87,6 +98,7 @@ changed enough to warrant a minor bump rather than 2.0.1.
 First PawnIO release: one window plus tray, no Windows service, Secure Boot
 can stay enabled. See the GitHub Release for that tag.
 
+[2.3.1]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.0.0...v2.1.0

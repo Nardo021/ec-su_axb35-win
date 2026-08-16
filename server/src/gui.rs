@@ -228,6 +228,7 @@ struct ControlApp {
     tray_rx: Receiver<TrayEvent>,
     nav: Nav,
     last_temp_alert: Option<Instant>,
+    hidden_to_tray: bool,
 }
 
 pub fn run(session: Arc<AppSession>, tray_rx: Receiver<TrayEvent>) -> Result<(), String> {
@@ -285,6 +286,7 @@ pub fn run(session: Arc<AppSession>, tray_rx: Receiver<TrayEvent>) -> Result<(),
         tray_rx,
         nav: Nav::home(),
         last_temp_alert: None,
+        hidden_to_tray: false,
     };
     let title = t(session.config.lock().unwrap().language(), "app_title");
 
@@ -352,7 +354,7 @@ fn install_theme(ctx: &egui::Context, theme: &Theme) {
     };
     apply_widget_visuals(&mut visuals, control);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.visuals = visuals;
     style.spacing.item_spacing = egui::vec2(6.0, 6.0);
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
@@ -374,7 +376,7 @@ fn install_theme(ctx: &egui::Context, theme: &Theme) {
         egui::TextStyle::Small,
         FontId::new(12.0, FontFamily::Proportional),
     );
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 struct WidgetFill {
@@ -513,20 +515,34 @@ pub(crate) fn hide_on_close(close_to_tray: bool, quitting: bool) -> bool {
     close_to_tray && !quitting
 }
 
-impl eframe::App for ControlApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        crate::tray::set_gui_hwnd(hwnd_from_handle(&frame.window_handle()));
-        let chrome = ui_chrome();
-        if self.last_chrome != Some(chrome) {
-            let theme = Theme::from_chrome(chrome);
-            install_theme(ctx, &theme);
-            self.last_chrome = Some(chrome);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IdlePaintPolicy {
+    paint_ui: bool,
+    repaint_after: Duration,
+}
+
+fn idle_paint_policy(hidden_to_tray: bool) -> IdlePaintPolicy {
+    if hidden_to_tray {
+        IdlePaintPolicy {
+            paint_ui: false,
+            repaint_after: Duration::from_secs(1),
         }
-        let theme = Theme::from_chrome(chrome);
+    } else {
+        IdlePaintPolicy {
+            paint_ui: true,
+            repaint_after: Duration::from_millis(200),
+        }
+    }
+}
+
+impl eframe::App for ControlApp {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::tray::set_gui_hwnd(hwnd_from_handle(&frame.window_handle()));
 
         while let Ok(event) = self.tray_rx.try_recv() {
             match event {
                 TrayEvent::ShowWindow => {
+                    self.hidden_to_tray = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -555,6 +571,7 @@ impl eframe::App for ControlApp {
                 .unwrap()
                 .close_to_tray;
             if hide_on_close(close_to_tray, crate::tray::is_quitting()) {
+                self.hidden_to_tray = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             } else {
@@ -563,6 +580,22 @@ impl eframe::App for ControlApp {
         }
 
         maybe_temp_alert(self);
+        ctx.request_repaint_after(idle_paint_policy(self.hidden_to_tray).repaint_after);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if !idle_paint_policy(self.hidden_to_tray).paint_ui {
+            return;
+        }
+
+        let ctx = ui.ctx().clone();
+        let chrome = ui_chrome();
+        if self.last_chrome != Some(chrome) {
+            let theme = Theme::from_chrome(chrome);
+            install_theme(&ctx, &theme);
+            self.last_chrome = Some(chrome);
+        }
+        let theme = Theme::from_chrome(chrome);
 
         if self.nav.page != Page::Home && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.nav.back();
@@ -577,7 +610,7 @@ impl eframe::App for ControlApp {
                     .fill(theme.bg)
                     .inner_margin(Margin::same(10)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 let mut state = self.state.lock().unwrap();
                 if let (Some(_), Some(timestamp)) = (&state.error, state.error_at) {
                     if timestamp.elapsed() > Duration::from_secs(5) {
@@ -624,7 +657,7 @@ impl eframe::App for ControlApp {
                                 draw_error(ui, lang, &theme, &state);
                                 ui.add_space(10.0);
                                 draw_settings(
-                                    ui, lang, &theme, ctx, &mut state, &shared, &mut nav, hwnd,
+                                    ui, lang, &theme, &ctx, &mut state, &shared, &mut nav, hwnd,
                                 );
                             }
                             Page::About => {
@@ -637,15 +670,14 @@ impl eframe::App for ControlApp {
                                 draw_page_header(ui, lang, &theme, &mut nav, "diagnostics");
                                 draw_error(ui, lang, &theme, &state);
                                 ui.add_space(10.0);
-                                draw_diagnostics(ui, lang, &theme, ctx, &mut state);
+                                draw_diagnostics(ui, lang, &theme, &ctx, &mut state);
                             }
                         }
                     });
             });
         self.nav = nav;
 
-        configure_window(self, ctx);
-        ctx.request_repaint_after(Duration::from_millis(200));
+        configure_window(self, &ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1835,6 +1867,20 @@ mod tests {
         assert!(!hide_on_close(true, true));
         assert!(!hide_on_close(false, false));
         assert!(!hide_on_close(false, true));
+    }
+
+    #[test]
+    fn hidden_to_tray_skips_ui_paint_and_slows_repaint() {
+        let policy = idle_paint_policy(true);
+        assert!(!policy.paint_ui);
+        assert!(policy.repaint_after >= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn visible_window_keeps_live_refresh() {
+        let policy = idle_paint_policy(false);
+        assert!(policy.paint_ui);
+        assert_eq!(policy.repaint_after, Duration::from_millis(200));
     }
 
     #[test]

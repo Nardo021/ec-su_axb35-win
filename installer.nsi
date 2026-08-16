@@ -2,7 +2,7 @@
 
 !define PRODUCT_NAME "ec-su_axb35-win"
 !define PRODUCT_DISPLAY_NAME "ec-su_axb35-win"
-!define PRODUCT_VERSION "2.3.0"
+!define PRODUCT_VERSION "2.3.1"
 !define PRODUCT_PUBLISHER "Nardo021"
 !define PRODUCT_WEB_SITE "https://github.com/Nardo021/ec-su_axb35-win"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\evox2-control.exe"
@@ -40,7 +40,7 @@ ShowInstDetails show
 ShowUnInstDetails show
 RequestExecutionLevel admin
 
-VIProductVersion "2.3.0.0"
+VIProductVersion "2.3.1.0"
 VIAddVersionKey "ProductName" "${PRODUCT_DISPLAY_NAME}"
 VIAddVersionKey "Comments" "Single-process GUI for SU_AXB35 EC control"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"

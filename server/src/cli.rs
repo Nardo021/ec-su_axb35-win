@@ -19,8 +19,7 @@ pub const EXIT_UNSUPPORTED_HARDWARE: i32 = 5;
 pub const EXIT_FIRMWARE: i32 = 6;
 
 #[derive(Parser, Debug)]
-#[command(name = "evox2ctl")]
-#[command(about = "SU_AXB35 EC control")]
+#[command(name = "evox2ctl", version, about = "SU_AXB35 EC control")]
 pub struct Args {
     #[arg(long, global = true)]
     pub json: bool,

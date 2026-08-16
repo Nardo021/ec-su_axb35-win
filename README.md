@@ -14,8 +14,8 @@ This application does not require Secure Boot to be disabled.
 
 See [docs/PAWNIO_MIGRATION.md](docs/PAWNIO_MIGRATION.md) for the driver change.
 
-**Download the latest release, currently [v2.3.0](https://github.com/Nardo021/ec-su_axb35-win/releases/latest).**
-Most people should take `ec-su_axb35-win-installer-2.3.0.exe`. See [Download](#download).
+**Download the latest release, currently [v2.3.1](https://github.com/Nardo021/ec-su_axb35-win/releases/latest).**
+Most people should take `ec-su_axb35-win-installer-2.3.1.exe`. See [Download](#download).
 
 ## Requirements
 
@@ -30,7 +30,7 @@ secure configuration.
 
 ## Download
 
-Use the **latest** GitHub Release (currently **v2.3.0**):
+Use the **latest** GitHub Release (currently **v2.3.1**):
 
 https://github.com/Nardo021/ec-su_axb35-win/releases/latest
 
@@ -40,8 +40,8 @@ those still rely on WinRing0.
 
 | File on the release page | Who it is for |
 | --- | --- |
-| `ec-su_axb35-win-installer-2.3.0.exe` | Normal install. **Download this** unless you have a reason not to. |
-| `evox2-control-v2.3.0.zip` | Portable copy: GUI and CLI in one folder. |
+| `ec-su_axb35-win-installer-2.3.1.exe` | Normal install. **Download this** unless you have a reason not to. |
+| `evox2-control-v2.3.1.zip` | Portable copy: GUI and CLI in one folder. |
 | `evox2-control.exe` | Window and tray only. Same program as the CLI binary. |
 | `evox2ctl.exe` | Command line only. Same program as `evox2-control.exe`, renamed. |
 | Source code (zip / tar.gz) | Source for building. **Not** a Windows app. Skip this. |
@@ -276,11 +276,11 @@ Actions builds the Windows binaries and publishes a Release:
 
 ```powershell
 # bump version in server/Cargo.toml first, then:
-git tag v2.3.0
-git push origin v2.3.0
+git tag v2.3.1
+git push origin v2.3.1
 ```
 
-The tag must look like `v2.3.0` and match Cargo. The Release includes
+The tag must look like `v2.3.1` and match Cargo. The Release includes
 `evox2-control.exe`, `evox2ctl.exe`, a zip of both, and the NSIS installer
 when NSIS is available. Optional Authenticode signing runs only when
 `SIGNING_PFX` / `SIGNING_PASSWORD` secrets exist. PawnIO is not bundled.
