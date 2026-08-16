@@ -48,15 +48,6 @@ those still rely on WinRing0.
 
 PawnIO is not in any of those files. Install it from https://pawnio.eu/ first.
 
-### 中文：该下哪个
-
-请下 **最新版 v2.3.0**（页面上标 Latest 的那一条），不要下 v2.2.0 及更早，也不要下上游 WinRing0 版本。
-
-- 一般用户：下载 `ec-su_axb35-win-installer-2.3.0.exe`，以管理员身份运行。
-- 不想安装：下载 `evox2-control-v2.3.0.zip`，解压后双击 `evox2-control.exe`。
-- 不要下 GitHub 自动生成的 `Source code` 压缩包，那是源码，不能直接运行。
-- 驱动请另装官方 PawnIO：https://pawnio.eu/
-
 ## Installation
 
 1. Install the official PawnIO release from https://pawnio.eu/.
@@ -153,7 +144,7 @@ control returns to processor and fan controls.
 - Close window: minimize to tray (default) or quit the program
 - Start with Windows: off by default; creates an on-logon Task Scheduler
   entry named `EVO-X2 Control` with highest privileges (required for PawnIO)
-- Language: English (default) or 中文
+- Language: English (default) or Chinese
 - Temperature source: GPU (default), CPU, SoC, GPU hotspot, or EC 0x70.
   This is the processor reading used for fan curves and alerts
 - Temperature alert: tray balloon when the processor temperature stays at or above
