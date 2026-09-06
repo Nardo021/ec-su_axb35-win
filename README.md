@@ -14,8 +14,8 @@ This application does not require Secure Boot to be disabled.
 
 See [docs/PAWNIO_MIGRATION.md](docs/PAWNIO_MIGRATION.md) for the driver change.
 
-**Download the latest release, currently [v2.5.1](https://github.com/Nardo021/ec-su_axb35-win/releases/latest).**
-Most people should take `ec-su_axb35-win-installer-2.5.1.exe`. See [Download](#download).
+**Download the latest release, currently [v2.5.2](https://github.com/Nardo021/ec-su_axb35-win/releases/latest).**
+Most people should take `ec-su_axb35-win-installer-2.5.2.exe`. See [Download](#download).
 
 ## Requirements
 
@@ -30,7 +30,7 @@ secure configuration.
 
 ## Download
 
-Use the **latest** GitHub Release (currently **v2.5.1**):
+Use the **latest** GitHub Release (currently **v2.5.2**):
 
 https://github.com/Nardo021/ec-su_axb35-win/releases/latest
 
@@ -40,8 +40,8 @@ those still rely on WinRing0.
 
 | File on the release page | Who it is for |
 | --- | --- |
-| `ec-su_axb35-win-installer-2.5.1.exe` | Normal install. **Download this** unless you have a reason not to. |
-| `evox2-control-v2.5.1.zip` | Portable copy: GUI and CLI in one folder. |
+| `ec-su_axb35-win-installer-2.5.2.exe` | Normal install. **Download this** unless you have a reason not to. |
+| `evox2-control-v2.5.2.zip` | Portable copy: GUI and CLI in one folder. |
 | `evox2-control.exe` | Window and tray only. Same program as the CLI binary. |
 | `evox2ctl.exe` | Command line only. Same program as `evox2-control.exe`, renamed. |
 | Source code (zip / tar.gz) | Source for building. **Not** a Windows app. Skip this. |
@@ -149,7 +149,7 @@ control returns to processor and fan controls.
 - Close window: minimize to tray (default) or quit the program
 - Start with Windows: off by default; creates an on-logon Task Scheduler
   entry named `EVO-X2 Control` with highest privileges (required for PawnIO).
-  Only the Program Files install can enable this. A portable zip is refused.
+  The installer and the portable zip both register the running executable.
 - Language: English (default) or Chinese
 - Temperature source: GPU (default), CPU, SoC, GPU hotspot, or EC 0x70.
   This is the processor reading used for fan curves and alerts
@@ -272,7 +272,7 @@ Configuration: `%SYSTEMDRIVE%\ProgramData\ec-su_axb35-win\config.json`
   "temp_alert_enabled": true,
   "temp_alert_celsius": 90,
   "smoothing_window": 8,
-  "app_version": "2.5.1"
+  "app_version": "2.5.2"
 }
 ```
 
@@ -291,7 +291,8 @@ settings, and the smoothing window. The log is appended and rotated to
 - The installer does not open Windows Firewall ports.
 - Unknown machines do not receive speculative EC writes.
 - The ProgramData folder is limited to SYSTEM and Administrators.
-- Start with Windows is only offered for a Program Files install.
+- Start with Windows registers an ONLOGON / Highest task for the running
+  executable (Program Files install or portable zip).
 - Hardware libraries load from System32, not the program folder.
 
 ## Publishing a release
@@ -301,11 +302,11 @@ Actions builds the Windows binaries and publishes a Release:
 
 ```powershell
 # bump version in server/Cargo.toml first, then:
-git tag v2.5.1
-git push origin v2.5.1
+git tag v2.5.2
+git push origin v2.5.2
 ```
 
-The tag must look like `v2.5.1` and match Cargo. The Release includes
+The tag must look like `v2.5.2` and match Cargo. The Release includes
 `evox2-control.exe`, `evox2ctl.exe`, a zip of both, and the NSIS installer
 when NSIS is available. Optional Authenticode signing runs only when
 `SIGNING_PFX` / `SIGNING_PASSWORD` secrets exist. PawnIO is not bundled.

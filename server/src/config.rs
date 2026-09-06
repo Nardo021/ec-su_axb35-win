@@ -371,7 +371,6 @@ fn sanitize_fan_config(fan: &mut FanConfig) {
     fan.name = fan.name.as_deref().and_then(sanitize_name);
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,7 +409,7 @@ mod tests {
         assert_eq!(parsed.temperature_source(), TemperatureSource::Gpu);
         assert_eq!(parsed.smoothing_window, SMOOTHING_WINDOW_DEFAULT);
         assert_eq!(parsed.processor_name, None);
-        assert_eq!(parsed.app_version, "2.5.1");
+        assert_eq!(parsed.app_version, "2.5.2");
     }
 
     #[test]
@@ -426,7 +425,7 @@ mod tests {
         .unwrap();
         sanitize_loaded_config(&mut parsed);
         assert_eq!(parsed.app_version, current_app_version());
-        assert_eq!(parsed.app_version, "2.5.1");
+        assert_eq!(parsed.app_version, "2.5.2");
     }
 
     #[test]
@@ -456,7 +455,7 @@ mod tests {
         assert!(json.contains("temp_alert_enabled"));
         assert!(json.contains("\"temperature_source\":\"gpu\""));
         assert!(json.contains("\"smoothing_window\":8"));
-        assert!(json.contains("\"app_version\":\"2.5.1\""));
+        assert!(json.contains("\"app_version\":\"2.5.2\""));
     }
 
     #[test]

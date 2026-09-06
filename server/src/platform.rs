@@ -28,8 +28,8 @@ use winapi::um::sysinfoapi::{ComputerNameDnsHostname, GetComputerNameExW};
 use winapi::um::winbase::WAIT_OBJECT_0;
 use winapi::um::winnls::GetACP;
 use winapi::um::winnt::{
-    HANDLE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, SYNCHRONIZE,
-    TOKEN_ELEVATION, TOKEN_QUERY,
+    HANDLE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, SYNCHRONIZE, TOKEN_ELEVATION,
+    TOKEN_QUERY,
 };
 use winapi::um::winreg::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER,
@@ -37,9 +37,8 @@ use winapi::um::winreg::{
 };
 use winapi::um::winuser::SW_SHOWNORMAL;
 
-use crate::harden::{normalize_exe_path, path_is_under_program_files, system_directory};
+use crate::harden::{normalize_exe_path, system_directory};
 use crate::hardware::read_reg_string;
-use crate::i18n::{t, Language};
 
 const WAIT_ABANDONED: DWORD = 0x00000080;
 const ACCESS_EC_TIMEOUT_MS: DWORD = 5_000;
@@ -357,16 +356,16 @@ fn logon_task_matches_current_exe() -> bool {
     let Ok(exe) = current_exe_path() else {
         return false;
     };
-    path_is_under_program_files(&command)
-        && normalize_exe_path(&command).eq_ignore_ascii_case(&normalize_exe_path(&exe))
+    logon_command_matches_exe(&command, &exe)
+}
+
+pub(crate) fn logon_command_matches_exe(command: &str, exe: &str) -> bool {
+    normalize_exe_path(command).eq_ignore_ascii_case(&normalize_exe_path(exe))
 }
 
 pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     if enabled {
         let exe = current_exe_path()?;
-        if !path_is_under_program_files(&exe) {
-            return Err(t(current_ui_language(), "autostart_needs_install").to_string());
-        }
         let output = run_schtasks(&schtasks_create_args(&exe))?;
         if !output.success {
             return Err(format!(
@@ -587,12 +586,6 @@ fn schtasks_exe() -> String {
     format!("{}\\schtasks.exe", system_directory())
 }
 
-fn current_ui_language() -> Language {
-    crate::config::ServerConfig::load()
-        .map(|config| config.language())
-        .unwrap_or(Language::En)
-}
-
 pub fn shell_open(path: &str) {
     let operation = wide("open");
     let path_w = wide(path);
@@ -803,6 +796,31 @@ mod tests {
             pair[0] == "/TR" && pair[1] == r#""C:\Program Files\ec-su_axb35-win\evox2-control.exe""#
         }));
         assert!(args.contains(&"/F".to_string()));
+    }
+
+    #[test]
+    fn logon_task_create_accepts_portable_path() {
+        let exe = r"D:\portable\evox2-control.exe";
+        let args = schtasks_create_args(exe);
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair[0] == "/TR" && pair[1] == r#""D:\portable\evox2-control.exe""# }));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "/RL" && pair[1] == "HIGHEST"));
+    }
+
+    #[test]
+    fn logon_command_matches_portable_and_install_paths() {
+        let portable = r"D:\tools\evox2-control.exe";
+        let installed = r"C:\Program Files\ec-su_axb35-win\evox2-control.exe";
+        assert!(logon_command_matches_exe(portable, portable));
+        assert!(logon_command_matches_exe(
+            &format!("\"{portable}\""),
+            portable
+        ));
+        assert!(logon_command_matches_exe(installed, installed));
+        assert!(!logon_command_matches_exe(installed, portable));
     }
 
     #[test]

@@ -5,6 +5,13 @@ All notable changes to ec-su_axb35-win are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.2] - 2026-09-06
+
+### Changed
+
+- Start with Windows works for portable zip builds as well as a Program
+  Files install. The logon task still points at the running executable.
+
 ## [2.5.1] - 2026-08-16
 
 Local privilege-escalation hardening. Fan and curve behavior is unchanged.
@@ -158,6 +165,7 @@ changed enough to warrant a minor bump rather than 2.0.1.
 First PawnIO release: one window plus tray, no Windows service, Secure Boot
 can stay enabled. See the GitHub Release for that tag.
 
+[2.5.2]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.5.1...v2.5.2
 [2.5.1]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/Nardo021/ec-su_axb35-win/compare/v2.3.1...v2.4.0

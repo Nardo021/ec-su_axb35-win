@@ -7,7 +7,6 @@ use winapi::um::accctrl::SE_FILE_OBJECT;
 use winapi::um::aclapi::SetNamedSecurityInfoW;
 use winapi::um::libloaderapi::LoadLibraryW;
 use winapi::um::securitybaseapi::GetSecurityDescriptorDacl;
-use winapi::um::shlobj::{SHGetFolderPathW, CSIDL_PROGRAM_FILES, CSIDL_PROGRAM_FILESX86};
 use winapi::um::sysinfoapi::{GetSystemDirectoryW, GetWindowsDirectoryW};
 use winapi::um::winbase::LocalFree;
 use winapi::um::winnt::{
@@ -83,38 +82,6 @@ pub fn normalize_exe_path(value: &str) -> String {
     out.to_string_lossy().replace('/', "\\")
 }
 
-pub fn path_is_under_program_files(exe: &str) -> bool {
-    path_is_under_prefixes(exe, &program_files_dirs())
-}
-
-pub fn path_is_under_prefixes(exe: &str, prefixes: &[String]) -> bool {
-    let normalized = normalize_exe_path(exe);
-    if normalized.is_empty() {
-        return false;
-    }
-    prefixes.iter().any(|prefix| {
-        let prefix = normalize_exe_path(prefix)
-            .trim_end_matches('\\')
-            .to_string();
-        if prefix.is_empty() {
-            return false;
-        }
-        if normalized.eq_ignore_ascii_case(&prefix) {
-            return true;
-        }
-        let with_sep = format!("{prefix}\\");
-        normalized.len() > with_sep.len()
-            && normalized[..with_sep.len()].eq_ignore_ascii_case(&with_sep)
-    })
-}
-
-pub fn program_files_dirs() -> Vec<String> {
-    [CSIDL_PROGRAM_FILES, CSIDL_PROGRAM_FILESX86]
-        .into_iter()
-        .filter_map(known_folder)
-        .collect()
-}
-
 fn is_safe_library_file_name(file_name: &str) -> bool {
     !file_name.is_empty()
         && !file_name.contains(['\\', '/'])
@@ -142,30 +109,6 @@ fn query_windows_dir(
             fallback.to_string()
         } else {
             text.to_string()
-        }
-    }
-}
-
-fn known_folder(csidl: i32) -> Option<String> {
-    unsafe {
-        let mut buffer = [0u16; 260];
-        let status = SHGetFolderPathW(
-            ptr::null_mut(),
-            csidl,
-            ptr::null_mut(),
-            0,
-            buffer.as_mut_ptr(),
-        );
-        if status < 0 {
-            return None;
-        }
-        let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
-        let path = String::from_utf16_lossy(&buffer[..len]);
-        let path = path.trim_end_matches('\\');
-        if path.is_empty() {
-            None
-        } else {
-            Some(path.to_string())
         }
     }
 }
@@ -252,34 +195,6 @@ mod tests {
             normalize_exe_path(r#""C:\Program Files\ec-su_axb35-win\evox2-control.exe""#),
             r"C:\Program Files\ec-su_axb35-win\evox2-control.exe"
         );
-    }
-
-    #[test]
-    fn program_files_prefix_matches_install_dir_only() {
-        let prefixes = vec![
-            r"C:\Program Files".into(),
-            r"C:\Program Files (x86)".into(),
-        ];
-        assert!(path_is_under_prefixes(
-            r"C:\Program Files\ec-su_axb35-win\evox2-control.exe",
-            &prefixes
-        ));
-        assert!(path_is_under_prefixes(
-            r"C:\Program Files (x86)\ec-su_axb35-win\evox2-control.exe",
-            &prefixes
-        ));
-        assert!(!path_is_under_prefixes(
-            r"C:\Program Files\ec-su_axb35-win\..\..\Windows\System32\cmd.exe",
-            &prefixes
-        ));
-        assert!(!path_is_under_prefixes(
-            r"D:\Dev\projects\ec-su_axb35-win\dist\evox2-control.exe",
-            &prefixes
-        ));
-        assert!(!path_is_under_prefixes(
-            r"C:\Program Files foo\evox2-control.exe",
-            &prefixes
-        ));
     }
 
     #[test]
