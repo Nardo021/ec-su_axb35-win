@@ -48,6 +48,7 @@ const RELOAD_FANS_EVENT_NAME: &str = "Global\\EVOX2-Control-ReloadFans";
 const EVENT_MODIFY_STATE: DWORD = 0x0002;
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "EVO-X2 Control";
+const CURRENT_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion";
 const STARTUP_TASK_NAME: &str = "EVO-X2 Control";
 const STARTUP_APPROVED_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
@@ -331,6 +332,9 @@ pub fn current_exe_path() -> Result<String, String> {
 
 pub fn is_start_with_windows() -> bool {
     logon_task_matches_current_exe()
+        && current_exe_path()
+            .map(|exe| is_trusted_install_path(&exe))
+            .unwrap_or(false)
 }
 
 pub fn reconcile_start_with_windows() -> bool {
@@ -366,6 +370,14 @@ pub(crate) fn logon_command_matches_exe(command: &str, exe: &str) -> bool {
 pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     if enabled {
         let exe = current_exe_path()?;
+        if !is_trusted_install_path(&exe) {
+            return Err(format!(
+                "Start with Windows requires the installed copy under {}. \
+                 A portable copy in a user-writable folder could be replaced \
+                 and would then run as administrator at logon.",
+                program_files_dir()
+            ));
+        }
         let output = run_schtasks(&schtasks_create_args(&exe))?;
         if !output.success {
             return Err(format!(
@@ -399,6 +411,23 @@ pub(crate) fn run_value_matches(stored: &str, exe_path: &str) -> bool {
 
 pub(crate) fn registry_delete_succeeded(status: i32) -> bool {
     status == ERROR_SUCCESS as i32 || status == ERROR_FILE_NOT_FOUND as i32
+}
+
+/// Read from HKLM rather than %ProgramFiles% so a caller can't spoof it via env.
+fn program_files_dir() -> String {
+    read_reg_string(HKEY_LOCAL_MACHINE, CURRENT_VERSION_KEY, "ProgramFilesDir")
+        .unwrap_or_else(|| r"C:\Program Files".to_string())
+}
+
+pub(crate) fn is_trusted_install_path(exe: &str) -> bool {
+    path_is_under(exe, &program_files_dir())
+}
+
+pub(crate) fn path_is_under(path: &str, dir: &str) -> bool {
+    let path = normalize_exe_path(path).to_ascii_lowercase();
+    let dir = normalize_exe_path(dir).to_ascii_lowercase();
+    let dir = dir.trim_end_matches('\\');
+    !dir.is_empty() && path.starts_with(&format!("{dir}\\"))
 }
 
 pub(crate) fn schtasks_create_args(exe_path: &str) -> Vec<String> {
@@ -796,6 +825,22 @@ mod tests {
             pair[0] == "/TR" && pair[1] == r#""C:\Program Files\ec-su_axb35-win\evox2-control.exe""#
         }));
         assert!(args.contains(&"/F".to_string()));
+    }
+
+    #[test]
+    fn only_program_files_is_trusted_for_logon_task() {
+        let pf = r"C:\Program Files";
+        assert!(path_is_under(
+            r"C:\Program Files\ec-su_axb35-win\evox2-control.exe",
+            pf
+        ));
+        assert!(path_is_under(
+            r#""C:\Program Files\ec-su_axb35-win\evox2-control.exe""#,
+            pf
+        ));
+        assert!(!path_is_under(r"D:\Tools\evox2-control.exe", pf));
+        assert!(!path_is_under(r"C:\Program Files Evil\x.exe", pf));
+        assert!(!path_is_under(r"C:\Program Files\..\Users\Leo\x.exe", pf));
     }
 
     #[test]

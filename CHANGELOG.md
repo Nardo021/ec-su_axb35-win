@@ -5,6 +5,24 @@ All notable changes to ec-su_axb35-win are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.3] - 2026-11-21
+
+### Security
+
+- Reverts the 2.5.2 portable Start with Windows change. The ONLOGON /
+  Highest logon task is only registered when `evox2-control.exe` lives
+  under Program Files (read from `HKLM\...\CurrentVersion\ProgramFilesDir`,
+  not `%ProgramFiles%`). A copy in a user-writable folder such as
+  `D:\Tools` could be replaced by any process running as the user and
+  would then run elevated at the next logon without a UAC prompt.
+- On startup, an existing `EVO-X2 Control` task that points at a
+  portable path is removed.
+
+### Changed
+
+- Portable zip builds can no longer enable Start with Windows. Use the
+  installer if you want the logon task.
+
 ## [2.5.2] - 2026-09-06
 
 ### Changed
