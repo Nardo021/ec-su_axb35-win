@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(parsed.temperature_source(), TemperatureSource::Gpu);
         assert_eq!(parsed.smoothing_window, SMOOTHING_WINDOW_DEFAULT);
         assert_eq!(parsed.processor_name, None);
-        assert_eq!(parsed.app_version, "2.5.2");
+        assert_eq!(parsed.app_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
@@ -425,7 +425,7 @@ mod tests {
         .unwrap();
         sanitize_loaded_config(&mut parsed);
         assert_eq!(parsed.app_version, current_app_version());
-        assert_eq!(parsed.app_version, "2.5.2");
+        assert_eq!(parsed.app_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
@@ -455,7 +455,10 @@ mod tests {
         assert!(json.contains("temp_alert_enabled"));
         assert!(json.contains("\"temperature_source\":\"gpu\""));
         assert!(json.contains("\"smoothing_window\":8"));
-        assert!(json.contains("\"app_version\":\"2.5.2\""));
+        assert!(json.contains(&format!(
+            "\"app_version\":\"{}\"",
+            env!("CARGO_PKG_VERSION")
+        )));
     }
 
     #[test]
